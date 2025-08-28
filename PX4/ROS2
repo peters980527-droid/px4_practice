@@ -1,0 +1,5 @@
+# ROS2 실행
+MicroXRCEAgent udp4 -p 8888         # ROS2 연결 브릿지 활성화
+source /opt/ros/jazzy/setup.bash            # ROS2 터미널에서 쓸때마다 먼저 실행시켜야하는 명령
+
+

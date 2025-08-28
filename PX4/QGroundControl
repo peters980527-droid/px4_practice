@@ -1,0 +1,4 @@
+# QGroundControl 실행
+cd ~/Downloads          # QGroundControl 실행 파일이 Downloads 폴더에 있음
+chmod +X QGroundControl-x86_64.AppImage             # QGroundControl 실행권한 / 굳이 안해도 되는듯
+./QGroundControl-x86_64.AppImage            # QGroundControl 실행
