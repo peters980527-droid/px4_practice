@@ -1,23 +1,36 @@
 정리
-PX4는 안드로이드같이 OS같은 느낌. 센서, 경로, 제어 정보들을 종합하고 다시 신호를 보내는곳. PX4는 FCU, 즉 Pixhawk같은 드론 비행컨트롤러 (컴퓨터)에 설치됌.
+PX4는 안드로이드같이 OS같은 느낌. 센서, 경로, 제어 정보들을 종합하고 다시 신호를 보내는곳. 
+PX4는 FCU, 즉 Pixhawk같은 드론 비행컨트롤러 (컴퓨터)에 설치됌.
 
-ROS2는 개발툴. 고수준 제어 명령 코드들을 입력해서 PX4로 보냄. ROS2같은 개발툴은 컴패니언 컴퓨터, Raspberry pi같은 또다른 컴퓨터에 설치됌. ROS2에서 PX4로 정보를 보낼때는 MicroRtps라는 통신툴을 사용 (PX4가 ROS2의 DDS/RTPS를 바로 이해못하기 때문). Micrortps Client를 통해서 uORB(PX4가 알아듣는 언어?) 로 변환후 PX4로 보냄.
+ROS2는 개발툴. 고수준 제어 명령 코드들을 입력해서 PX4로 보냄. ROS2같은 개발툴은 컴패니언 컴퓨터, Raspberry pi같은 또다른 컴퓨터에 설치됌. 
+ROS2에서 PX4로 정보를 보낼때는 MicroRtps라는 통신툴을 사용 (PX4가 ROS2의 DDS/RTPS를 바로 이해못하기 때문). 
+Micrortps Client를 통해서 uORB(PX4가 알아듣는 언어?) 로 변환후 PX4로 보냄.
 
-MAVLink는 원래 통신 프로토콜이지만, pymavlink나 MAVSDK 같은 라이브러리 덕분에 개발자가 직접 코드를 짜는 개발툴처럼 활용할 수도 있음 (보통 지상센터 QGC같은거에 씀). ROS2가 고수준 개발툴이라면 Mavlink는 저수준 개발툴임. 따라서 ROS2를 안쓰고 저수준, 쉬운 개발이나 명령을 할때는 Mavlink만 써도 충분함.
+MAVLink는 원래 통신 프로토콜이지만, pymavlink나 MAVSDK 같은 라이브러리 덕분에 개발자가 직접 코드를 짜는 
+개발툴처럼 활용할 수도 있음 (보통 지상센터 QGC같은거에 씀). 
+ROS2가 고수준 개발툴이라면 Mavlink는 저수준 개발툴임. 따라서 ROS2를 안쓰고 저수준, 쉬운 개발이나 명령을 할때는 Mavlink만 써도 충분함.
 즉 ROS2가 PX4에 정보를 전달할때 Mavlink를 통하는게 아님. ROS2랑 Mavlink는 서로 다른 개발툴이면서 통신툴임.
 
 MavRos는 Ros1에 특화된 Mavlink 개발툴임. 즉, 나는 쓸일 없음
 
-MavSDK는 Mavlink의 고수준 개발툴이면서 훨씬 쉬움 (mavlink의 메시지를 직접 안쓰고 간단한 함수로만 조작 가능). 그래서 MavSDK를 더 많이 씀. 하지만 아직 mavlink만 지원하는게 있어서 상황에 따라 다름. 예를들어 Qgroundcontrol은 mavlink만 지원.
+MavSDK는 Mavlink의 고수준 개발툴이면서 훨씬 쉬움 (mavlink의 메시지를 직접 안쓰고 간단한 함수로만 조작 가능). 
+그래서 MavSDK를 더 많이 씀. 하지만 아직 mavlink만 지원하는게 있어서 상황에 따라 다름. 예를들어 Qgroundcontrol은 mavlink만 지원.
 
 Pymavlink는 그냥 mavlink를 파이썬 언어로 다룰수있는 툴임.
 
 ***FCU는 PX4랑 Mavlink를 이해만 할수있는 컴퓨터라 모든 개발툴은 컴패니언 컴퓨터에 설치됌.
 
-PX4_msgs는 Ros2가 PX4 메시지 구조를 알게 해주는거. Micrortps로 Ros2가 토픽은 전달 받지만 그 토픽 안에 뭐가 있는지 알 수가 없음 (노드 같은 거). PX4 msgs가 토픽안에 어떤 정보가 들어있는지 알려주는 그런거임.
+PX4_msgs는 Ros2가 PX4 메시지 구조를 알게 해주는거. Micrortps로 Ros2가 토픽은 전달 받지만 그 토픽 안에 뭐가 있는지 알 수가 없음 (노드 같은 거). 
+PX4 msgs가 토픽안에 어떤 정보가 들어있는지 알려주는 그런거임.
 
 
 
 Github에서 클론하는법
-Home에서 우선 워크스페이스 폴더를 만듦. 예를들어 mkdir px4_ros2_ws 같은거 만드는거임. mkdir -p ~/px4_ros2_ws/src 를 하면 px4_ros2_ws폴더를 만들고 그 안에 또 src 폴더를 한번에 만듬. src폴더는 github에서 주소를 클론할때 쓰는 폴더임. src폴더로 들어가서 git clone https://github.com/Jaeyoung-Lim/px4-offboard.git 같은 코드를 복사.
-그러면 px4_ros2_ws 폴더에 src말고 build, install, log폴더들이 생김. px4_ros2_ws에서 우선 source install/setup.bash 를 함으로써 환경을 설정해주고 ros2 launch px4_offboard offboard_position_control.launch.py 이런식으로 프로그램을 실행시켜주는 거임. 여기서 ros2 명령어는 위에서 다룬바와 같이 먼저 source /opt/ros/humble/setup.bash 를 먼저 해줘야 
+Home에서 우선 워크스페이스 폴더를 만듦. 예를들어 mkdir px4_ros2_ws 같은거 만드는거임. 
+mkdir -p ~/px4_ros2_ws/src 를 하면 px4_ros2_ws폴더를 만들고 그 안에 또 src 폴더를 한번에 만듬. 
+src폴더는 github에서 주소를 클론할때 쓰는 폴더임. src폴더로 들어가서 git clone https://github.com/Jaeyoung-Lim/px4-offboard.git 
+같은 코드를 복사.
+그러면 px4_ros2_ws 폴더에 src말고 build, install, log폴더들이 생김. 
+px4_ros2_ws에서 우선 source install/setup.bash 를 함으로써 환경을 설정해주고 
+ros2 launch px4_offboard offboard_position_control.launch.py 이런식으로 프로그램을 실행시켜주는 거임. 
+여기서 ros2 명령어는 위에서 다룬바와 같이 먼저 source /opt/ros/humble/setup.bash 를 먼저 해줘야 

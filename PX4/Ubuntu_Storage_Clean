@@ -1,6 +1,12 @@
 # PX4 로그로 인해서 우분투 용량이 찼을때
-rm -rf ~/PX4-Autopilot/build/*          # PX4 빌드 산출물
-rm -rf ~/PX4-Autopilot/log/*            # pX4 실행 로그
-rm -rf ~/.ros/log/*             # ROS2 실행 로그         
-rm -rf ~/.gz/* ~/.gazebo/logs/* ~/.ignition/* ~/.local/share/gz/*           # Gazebo 로그/캐시           
-sudo apt clean          # APT 캐시          
+
+rm -rf ~/PX4-Autopilot/build/*          
+ # PX4 빌드 산출물
+rm -rf ~/PX4-Autopilot/log/*            
+ # pX4 실행 로그
+rm -rf ~/.ros/log/*            
+ # ROS2 실행 로그         
+rm -rf ~/.gz/* ~/.gazebo/logs/* ~/.ignition/* ~/.local/share/gz/*          
+ # Gazebo 로그/캐시           
+sudo apt clean         
+ # APT 캐시          
