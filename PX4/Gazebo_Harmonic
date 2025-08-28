@@ -1,0 +1,12 @@
+# Gazebo Harmonic 실행
+cd ~/PX4-Autopilot          # PX4 폴더로 이동
+make px4_sitl gz_x500           # Gazebo에서 x500 드론 실행 / 다른 종류의 드론 설정 가능
+
+
+# Gazebo Sim이 안뜰경우
+pkill -f gz
+pkill -f ign
+pkill -f px4
+sleep 1
+ps -ef | egrep 'gz|ign|px4' | egrep -v egrep
+PX4_GZ_HEADLESS=0 make px4_sitl gz_x500
