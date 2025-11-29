@@ -1,0 +1,5 @@
+# mavsdk는 가상환경에 돌려야함
+cd ~/mavsdk_env
+source .venv/bin/activate
+cd ~/mavsdk_tests
+# mavsdk_tests에서 코드 실행시키면 됌. 예를 들어서 python simple_takeoff.py
