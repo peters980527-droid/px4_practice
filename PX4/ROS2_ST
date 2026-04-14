@@ -1,0 +1,2 @@
+source ~/nmpc_env/bin/activate
+cd ~/nmpc_ws
