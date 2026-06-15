@@ -1,1 +1,20 @@
 sudo MicroXRCEAgent serial --dev /dev/ttyTHS1 -b 921600
+
+ssh burlion@192.168.55.1
+# c to c / password:1234
+
+ssh burlion@192.168.1.131
+#Linksys00316 wifi / WIFI password: burliond141
+
+ssh burlion@192.168.1.122
+#FLIGHT LAB
+
+VICON computer ip: 192.168.1.106
+
+
+sudo MicroXRCEAgent serial --dev /dev/ttyTHS1 -b 921600
+ros2 launch vrpn_mocap client.launch.yaml server:=192.168.1.106 port:=3883
+
+unset ROS_LOCALHOST_ONLY
+ros2 daemon stop && ros2 daemon start
+ros2 topic list
