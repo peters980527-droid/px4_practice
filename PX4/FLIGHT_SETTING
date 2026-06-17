@@ -18,3 +18,8 @@ ros2 launch vrpn_mocap client.launch.yaml server:=192.168.1.106 port:=3883
 unset ROS_LOCALHOST_ONLY
 ros2 daemon stop && ros2 daemon start
 ros2 topic list
+
+
+source /opt/ros/humble/setup.bash
+source ~/px4_ros/install/setup.bash
+python3 ~/mocap_bridge.py
