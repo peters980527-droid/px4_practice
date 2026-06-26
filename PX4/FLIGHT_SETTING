@@ -23,3 +23,9 @@ ros2 topic list
 source /opt/ros/humble/setup.bash
 source ~/px4_ros/install/setup.bash
 python3 ~/mocap_bridge.py
+
+
+source /opt/ros/humble/setup.bash
+source ~/px4_ros/install/setup.bash
+source ~/acados_env/bin/activate
+python3 ~/nmpc_hover_test.py
