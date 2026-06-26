@@ -13,6 +13,8 @@ VICON computer ip: 192.168.1.106
 
 
 sudo MicroXRCEAgent serial --dev /dev/ttyTHS1 -b 921600
+
+
 ros2 launch vrpn_mocap client.launch.yaml server:=192.168.1.106 port:=3883
 
 unset ROS_LOCALHOST_ONLY
