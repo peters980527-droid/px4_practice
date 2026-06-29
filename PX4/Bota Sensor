@@ -1,1 +1,4 @@
+# Virtual Mode
+source ~/bota_env/bin/activate
 
+python3 bota_ft_test.py
