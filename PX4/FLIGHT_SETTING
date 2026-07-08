@@ -55,6 +55,9 @@ grep USE_WIND_PREVIEW ~/nmpc_hover_test.py
 
 
 
+
+#preview ON 인 상태고 바람은 50% (8m/s)
+
 cat > ~/nmpc_hover_test.py << 'EOF'
 from std_msgs.msg import Empty
 import os
