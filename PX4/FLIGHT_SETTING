@@ -43,6 +43,15 @@ python3 fan_node.py
 
 
 
+# ON
+sed -i 's/USE_WIND_PREVIEW = False/USE_WIND_PREVIEW = True/' ~/nmpc_hover_test.py
+
+#OFF
+sed -i 's/USE_WIND_PREVIEW = True/USE_WIND_PREVIEW = False/' ~/nmpc_hover_test.py
+
+#확인
+grep USE_WIND_PREVIEW ~/nmpc_hover_test.py
+
 
 
 
