@@ -44,13 +44,19 @@ python3 fan_node.py
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 # ON
-sed -i 's/USE_WIND_PREVIEW = False/USE_WIND_PREVIEW = True/' ~/nmpc_hover_test.py
+sed -i 's/USE_WIND_PREVIEW = .*/USE_WIND_PREVIEW = True   # preview ON\/OFF/' ~/nmpc_hover_test.py
 
 #OFF
-sed -i 's/USE_WIND_PREVIEW = True/USE_WIND_PREVIEW = False/' ~/nmpc_hover_test.py
+sed -i 's/USE_WIND_PREVIEW = .*/USE_WIND_PREVIEW = False   # preview ON\/OFF/' ~/nmpc_hover_test.py
 
 #확인
-grep USE_WIND_PREVIEW ~/nmpc_hover_test.py
+grep "USE_WIND_PREVIEW\|FAN_PERCENT" ~/nmpc_hover_test.py
+
+#바람 바꾸기 (예: 70%)
+sed -i 's/FAN_PERCENT      = .*/FAN_PERCENT      = 70.0   # 팬 파워 %/' ~/nmpc_hover_test.py
+
+sed -i 's/ANGLE_LIM        = .*/ANGLE_LIM        = 45.0   # roll\/pitch 제한 (deg)/' ~/nmpc_hover_test.py
+#max tilt 각도 바꾸기
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -58,6 +64,13 @@ grep USE_WIND_PREVIEW ~/nmpc_hover_test.py
 #preview ON 인 상태고 바람은 50% (8m/s)
 
 cat > ~/nmpc_hover_test.py << 'EOF'
+"""
+Wind Preview NMPC 실기 비행 코드 (Jetson)
+- 이륙 -> NMPC 20초 호버 -> 자동 착륙
+- NMPC 진입 시 /wind_start 발행 -> 노트북 fan_node 가 팬 구동
+- preview: 팬 명령시각 + 실측 동특성으로 계산한 바람 시계열을 MPC에 공급
+"""
+
 from std_msgs.msg import Empty
 import os
 os.environ['ACADOS_SOURCE_DIR'] = os.path.expanduser('~/acados')
@@ -76,6 +89,18 @@ from px4_msgs.msg import (
     VehicleLocalPosition,
     VehicleAttitude
 )
+
+# ========================================================
+# ===== 실험 설정 (여기만 바꾸면 됨) =====
+# ========================================================
+FAN_PERCENT      = 50.0   # 팬 파워 %  <- laptop/fan_node.py 의 FAN_POWER 와 반드시 동일!
+USE_WIND_PREVIEW = True   # preview ON/OFF
+ANGLE_LIM        = 30.0   # roll/pitch 제한 (deg). 90%+ 바람이면 45 권장
+THRUST_MAX       = 0.92   # 정규화 추력 상한. ANGLE_LIM=45 면 0.92 권장
+Q_POS            = 60.0   # x,y 위치 가중치 (검증값 60)
+# ========================================================
+WIND_MAX      = 16.0 * (FAN_PERCENT / 100.0)   # 100% = 16 m/s 선형 가정
+ANGLE_LIM_RAD = np.radians(ANGLE_LIM)          # solver 제약 + clip 에 함께 사용
 
 # ========================================================
 # PART 1: ACADOS Solver Setup
@@ -134,7 +159,7 @@ ocp.cost.Vx   = np.zeros((ny, nx));  ocp.cost.Vx[:nx, :] = np.eye(nx)
 ocp.cost.Vu   = np.zeros((ny, nu));  ocp.cost.Vu[nx:, :] = np.eye(nu)
 ocp.cost.Vx_e = np.eye(nx)
 
-Q_diag = np.array([60, 60, 80, 1, 1, 1, 0.1, 0.1, 0.1])
+Q_diag = np.array([Q_POS, Q_POS, 80, 1, 1, 1, 0.1, 0.1, 0.1])
 R_diag = np.array([0.01, 10, 10, 10])
 ocp.cost.W   = np.diag(np.concatenate([Q_diag, R_diag]))
 ocp.cost.W_e = 3.0 * np.diag(Q_diag)
@@ -143,8 +168,9 @@ u_hover = np.array([m*g, 0, 0, 0])
 ocp.cost.yref   = np.concatenate([np.zeros(nx), u_hover])
 ocp.cost.yref_e = np.zeros(nx)
 
-ocp.constraints.lbu = np.array([0.5*m*g, -0.6, -0.6, -0.3])
-ocp.constraints.ubu = np.array([3.0*m*g,  0.6,  0.6,  0.3])
+# 각도 제약: ANGLE_LIM 에서 자동 반영 (별도 수정 불필요)
+ocp.constraints.lbu = np.array([0.5*m*g, -ANGLE_LIM_RAD, -ANGLE_LIM_RAD, -0.3])
+ocp.constraints.ubu = np.array([3.0*m*g,  ANGLE_LIM_RAD,  ANGLE_LIM_RAD,  0.3])
 ocp.constraints.idxbu = np.array([0, 1, 2, 3])
 ocp.constraints.x0 = np.zeros(nx)
 ocp.parameter_values = np.zeros(3)
@@ -161,47 +187,26 @@ solver = AcadosOcpSolver(ocp, json_file='acados_ocp.json')
 print("ACADOS solver ready")
 
 # ========================================================
-# PART 2: Helper
+# PART 2: 바람 프로파일 (팬 물리 파라미터 — 전부 실측/설정값)
 # ========================================================
-
-# ===== 바람 프로파일: 팬의 물리 파라미터만으로 계산 =====
-# (임의의 구간 지정 없음. 명령 시각 + 실측된 팬 동특성으로 전부 계산)
-#
-# 물리 파라미터 (전부 실측 또는 fan_node 설정값):
-#   FAN_CMD_ON    = 3.0    팬 노드가 ON 명령 보내는 시각 (fan_node DELAY_BEFORE)
-#   FAN_CMD_OFF   = 13.0   팬 노드가 OFF 명령 보내는 시각 (DELAY_BEFORE + WIND_DURATION)
-#   FAN_DELAY_ON  = 1.6    ON 명령 -> 반응 시작 지연 (실측, getRPM 상승)
-#   FAN_DELAY_OFF = 0.41   OFF 명령 -> 감속 시작 지연 (실측, getRPM 하강)
-#   WIND_ACCEL    = 3.5    상승 가속도 (m/s^2, WindShape 스펙과 일치)
-#   WIND_DECEL    = 2.0    하강 감속도 (m/s^2, 실측: 8 m/s / 3.96 s)
-#   WIND_MAX      = 8.0    최대 풍속 (팬 50% = 8 m/s 가정)
-#
-# 자동 계산되는 타이밍:
-#   상승 시작 = 3.0 + 1.6  = 4.6
-#   최대 도달 = 4.6 + 8/3.5 = 6.9
-#   하강 시작 = 13.0 + 0.41 = 13.41
-#   0 도달   = 13.41 + 8/2.0 = 17.41
-FAN_CMD_ON    = 3.0
-FAN_CMD_OFF   = 13.0
-FAN_DELAY_ON  = 1.6
-FAN_DELAY_OFF = 0.41
-WIND_ACCEL    = 3.5
-WIND_DECEL    = 2.0
-WIND_MAX      = 8.0
+FAN_CMD_ON    = 3.0    # fan_node 가 ON 명령 보내는 시각 (DELAY_BEFORE)
+FAN_CMD_OFF   = 13.0   # fan_node 가 OFF 명령 보내는 시각 (DELAY_BEFORE+WIND_DURATION)
+FAN_DELAY_ON  = 1.6    # ON 명령 -> 반응 지연 (실측)
+FAN_DELAY_OFF = 0.41   # OFF 명령 -> 감속 지연 (실측)
+WIND_ACCEL    = 3.5    # 상승 가속 (스펙)
+WIND_DECEL    = 2.0    # 하강 감속 (실측 8/3.96)
 
 def get_wind(t):
-    rise_start = FAN_CMD_ON + FAN_DELAY_ON      # 4.6
-    fall_start = FAN_CMD_OFF + FAN_DELAY_OFF    # 13.41
+    rise_start = FAN_CMD_ON + FAN_DELAY_ON
+    fall_start = FAN_CMD_OFF + FAN_DELAY_OFF
     if t < rise_start:
         w = 0.0
     elif t < fall_start:
-        # 상승: 3.5 m/s^2 로 가속, WIND_MAX 에서 포화
         w = min(WIND_MAX, WIND_ACCEL * (t - rise_start))
     else:
-        # 하강: 실측 감속(2.0 m/s^2)으로 0까지
         w_at_fall = min(WIND_MAX, WIND_ACCEL * (fall_start - rise_start))
         w = max(0.0, w_at_fall - WIND_DECEL * (t - fall_start))
-    return np.array([-w, 0.0, 0.0])   # 실기: 팬이 드론을 -x로 밈
+    return np.array([-w, 0.0, 0.0])   # 실기: 팬이 드론을 -x 로 밈
 
 def euler_to_quat(roll, pitch, yaw):
     cr, sr = np.cos(roll/2), np.sin(roll/2)
@@ -219,16 +224,11 @@ def quat_to_euler(q):
     yaw   = np.arctan2(2*(w*z + x*y), 1 - 2*(y*y + z*z))
     return roll, pitch, yaw
 
-# ========================================================
-# PART 3: 파라미터
-# ========================================================
 HOVER_THRUST = 0.59
 TAKEOFF_ALT  = 1.0
-ANGLE_LIM    = 30.0
-USE_WIND_PREVIEW = True    # <<< preview ON
 
 # ========================================================
-# PART 4: ROS2 Node
+# PART 3: ROS2 Node
 # ========================================================
 class NMPCController(Node):
     def __init__(self):
@@ -273,7 +273,9 @@ class NMPCController(Node):
         self.land_sent = False
 
         self.timer = self.create_timer(CTRL_DT, self.timer_callback)
-        self.get_logger().info('NMPC Controller started')
+        self.get_logger().info(
+            f'NMPC started | fan {FAN_PERCENT:.0f}% -> {WIND_MAX:.1f} m/s | '
+            f'preview={USE_WIND_PREVIEW} | angle {ANGLE_LIM:.0f}deg | thrust<= {THRUST_MAX}')
 
     def pos_callback(self, msg):
         self.pos_ned = [msg.x, msg.y, msg.z]
@@ -396,11 +398,6 @@ class NMPCController(Node):
 
         t = self.counter * CTRL_DT - self.nmpc_start_time
 
-        if self.counter % int(0.1 * CTRL_HZ) == 0:
-            wnt = get_wind(t)[0]
-            print(f"[DEBUG] t={t:5.2f} wnt={wnt:4.1f} | x={state[0]:+.3f} y={state[1]:+.3f} z={state[2]:.3f} | "
-                  f"vx={state[3]:+.3f} vy={state[4]:+.3f} | "
-                  f"roll={np.degrees(state[6]):+.1f} pitch={np.degrees(state[7]):+.1f} yaw={np.degrees(state[8]):+.1f}")
         solver.set(0, 'lbx', state)
         solver.set(0, 'ubx', state)
 
@@ -425,13 +422,12 @@ class NMPCController(Node):
         else:
             u_opt = solver.get(0, 'u')
 
-        angle_lim_rad = np.radians(ANGLE_LIM)
-        roll_cmd  = float(np.clip(u_opt[1], -angle_lim_rad, angle_lim_rad))
-        pitch_cmd = float(np.clip(u_opt[2], -angle_lim_rad, angle_lim_rad))
+        roll_cmd  = float(np.clip(u_opt[1], -ANGLE_LIM_RAD, ANGLE_LIM_RAD))
+        pitch_cmd = float(np.clip(u_opt[2], -ANGLE_LIM_RAD, ANGLE_LIM_RAD))
 
         thrust = float(np.clip(
             (u_opt[0] / (m * g)) * HOVER_THRUST,
-            0.35, 0.85
+            0.35, THRUST_MAX
         ))
 
         att_msg = VehicleAttitudeSetpoint()
@@ -439,6 +435,14 @@ class NMPCController(Node):
         att_msg.thrust_body = [0.0, 0.0, -thrust]
         att_msg.timestamp = ts
         self.att_pub.publish(att_msg)
+
+        # 0.1초마다 로그 (thr = clip 후 정규화 추력, T = NMPC 요구 N, hover=18.6N)
+        if self.counter % int(0.1 * CTRL_HZ) == 0:
+            wnt = get_wind(t)[0]
+            print(f"[DEBUG] t={t:5.2f} wnt={wnt:5.1f} | x={state[0]:+.3f} y={state[1]:+.3f} z={state[2]:.3f} | "
+                  f"vx={state[3]:+.3f} vy={state[4]:+.3f} | "
+                  f"roll={np.degrees(state[6]):+.1f} pitch={np.degrees(state[7]):+.1f} yaw={np.degrees(state[8]):+.1f} | "
+                  f"thr={thrust:.3f} T={u_opt[0]:5.1f}N")
 
     def set_offboard_mode(self):
         msg = VehicleCommand()
@@ -486,3 +490,126 @@ def main():
 if __name__ == '__main__':
     main()
 EOF
+
+
+
+
+
+
+
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////
+fan_node 바람 바꾸기
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+sed -i 's/FAN_POWER      = .*/FAN_POWER      = 50.0    # 팬 파워 (%)/' fan_node.py
+# 원하는 바람 값으로 변
+grep "FAN_POWER      =" fan_node.py
+# 바뀐거 확인
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+"""
+팬 제어 노드 (노트북에서 실행)
+- /wind_start 받으면 3초 대기 후 팬 ON, 10초 유지 후 OFF
+- MPC 코드의 get_wind(WIND_MAX)와 짝을 이룸. 팬 파워 바꾸면 MPC도 같이 바꿔야 함.
+"""
+
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Empty
+
+import time
+import threading
+import windcontrol
+
+# ================= 설정 =================
+FAN_POWER      = 90.0    # 팬 파워 (%)  [100% = 16 m/s 가정]
+DELAY_BEFORE   = 3.0     # 신호 받고 팬 켜기까지 대기 (초)
+WIND_DURATION  = 10.0    # 바람 유지 시간 (초)
+# =======================================
+
+
+class FanNode(Node):
+    def __init__(self):
+        super().__init__('fan_node')
+
+        self.get_logger().info('WindShaper 연결 중...')
+        self.windshaper = windcontrol.WindShaper(verbose=False)
+        self.windshaper.startServerLink()
+        self.windshaper.requestToken()
+        time.sleep(1)
+        self.windshaper.startPSUs()
+        time.sleep(2)
+        self.get_logger().info(f'팬 준비 완료 (목표 {FAN_POWER}%). /wind_start 신호 대기 중...')
+
+        self.wind_running = False
+
+        self.sub = self.create_subscription(
+            Empty, '/wind_start', self.wind_start_callback, 10)
+
+    def wind_start_callback(self, msg):
+        if self.wind_running:
+            self.get_logger().warn('이미 바람 시퀀스 진행 중 - 신호 무시')
+            return
+        self.get_logger().info('/wind_start 수신! 바람 시퀀스 시작')
+        self.wind_running = True
+        t = threading.Thread(target=self.run_wind_sequence, daemon=True)
+        t.start()
+
+    def run_wind_sequence(self):
+        try:
+            self.get_logger().info(f'{DELAY_BEFORE}초 후 팬 ON 예정...')
+            time.sleep(DELAY_BEFORE)
+            self.get_logger().info(f'팬 ON ({FAN_POWER}%)')
+            self.windshaper.setFanPower(FAN_POWER)
+            time.sleep(WIND_DURATION)
+            self.windshaper.setFanPower(0)
+            self.get_logger().info('팬 OFF (바람 종료). 드론 복귀/착륙 가능.')
+        except Exception as e:
+            self.get_logger().error(f'에러 발생: {e} -> 팬 강제 OFF')
+            try:
+                self.windshaper.setFanPower(0)
+            except:
+                pass
+        finally:
+            self.wind_running = False
+
+    def shutdown_fans(self):
+        self.get_logger().info('노드 종료 - 팬 정리 중...')
+        try:
+            self.windshaper.setFanPower(0)
+            self.windshaper.turnOffModules()
+            self.windshaper.releaseToken()
+            self.windshaper.stopServerLink()
+            self.get_logger().info('팬 정리 완료.')
+        except Exception as e:
+            self.get_logger().error(f'팬 정리 중 에러: {e}')
+
+
+def main():
+    rclpy.init()
+    node = FanNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        print("\n[fan_node] 중단됨")
+    finally:
+        node.shutdown_fans()
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
+
+
+
+
+
+
+
+
