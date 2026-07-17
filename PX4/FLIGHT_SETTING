@@ -57,6 +57,15 @@ sed -i 's/USE_WIND_PREVIEW = .*/USE_WIND_PREVIEW = True   # preview ON\/OFF/' ~/
 #OFF
 sed -i 's/USE_WIND_PREVIEW = .*/USE_WIND_PREVIEW = False   # preview ON\/OFF/' ~/nmpc_hover_test.py
 
+#적분항 ON
+sed -i 's/USE_INTEGRAL     = .*/USE_INTEGRAL     = True   # 적분항 ON\/OFF/' ~/nmpc_hover_test.py
+
+#적분항 OFF
+sed -i 's/USE_INTEGRAL     = .*/USE_INTEGRAL     = False  # 적분항 ON\/OFF/' ~/nmpc_hover_test.py
+
+#확인
+grep "USE_" ~/nmpc_hover_test.py
+
 #확인
 grep "USE_WIND_PREVIEW\|FAN_PERCENT" ~/nmpc_hover_test.py
 
