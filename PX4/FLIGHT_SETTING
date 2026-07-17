@@ -537,7 +537,7 @@ import windcontrol
 # ================= 설정 =================
 FAN_POWER      = 90.0    # 팬 파워 (%)  [100% = 16 m/s 가정]
 DELAY_BEFORE   = 3.0     # 신호 받고 팬 켜기까지 대기 (초)
-WIND_DURATION  = 10.0    # 바람 유지 시간 (초)
+WIND_DURATION  = 20.0    # 바람 유지 시간 (초)
 # =======================================
 
 
@@ -976,7 +976,7 @@ class NMPCController(Node):
         if not (self.pos_received and self.att_received):
             return
 
-        if (self.counter * CTRL_DT - self.nmpc_start_time) > 20.0:
+        if (self.counter * CTRL_DT - self.nmpc_start_time) > 35.0:
             self.phase = 'LAND'
             self.get_logger().info('NMPC 종료 -> 자동 착륙')
             return
