@@ -790,7 +790,7 @@ print("ACADOS solver ready")
 # PART 2: 바람 프로파일 (팬 물리 파라미터 — 전부 실측/설정값)
 # ========================================================
 FAN_CMD_ON    = 3.0    # fan_node 가 ON 명령 보내는 시각 (DELAY_BEFORE)
-FAN_CMD_OFF   = 13.0   # fan_node 가 OFF 명령 보내는 시각 (DELAY_BEFORE+WIND_DURATION)
+FAN_CMD_OFF   = 23.0   # fan_node 가 OFF 명령 보내는 시각 (DELAY_BEFORE+WIND_DURATION)
 FAN_DELAY_ON  = 1.6    # ON 명령 -> 반응 지연 (실측)
 FAN_DELAY_OFF = 0.41   # OFF 명령 -> 감속 지연 (실측)
 WIND_ACCEL    = 3.5    # 상승 가속 (스펙)
