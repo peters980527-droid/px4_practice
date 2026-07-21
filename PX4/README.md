@@ -79,12 +79,50 @@ import casadi as ca
 
 [CasADi 공식 문서에서 symbolic framework와 자동 미분 확인하기](https://web.casadi.org/docs/?utm_source=chatgpt.com)
 
+```python
+from acados_template import AcadosOcp, AcadosOcpSolver, AcadosModel
+```
+acados_template에서 NMPC 문제를 만들고 실행하는 데 필요한 세 가지 클래스를 가져오는 줄
 
+acados_template은 os에 저장된 ~/acados 안에 있음. 거기서 세 가지 클래스를 빼오는 것.
 
+- AcadosModel: 드론의 상태·입력·동역학 수식을 담는 그릇
 
+- AcadosOcp: 비용함수·제약조건·예측구간 등을 포함한 최적제어 문제 전체
 
+- AcadosOcpSolver: 완성된 문제를 바탕으로 solver를 생성하고 실행하는 기능
 
+[acados class에 대한 설명은 여기 참](https://docs.acados.org/python_interface/index.html?utm_source=chatgpt.com)
 
+```python
+from px4_msgs.msg import (
+    OffboardControlMode,
+    TrajectorySetpoint,
+    VehicleAttitudeSetpoint,
+    VehicleCommand,
+    VehicleLocalPosition,
+    VehicleAttitude
+)
+```
+px4_msgs 패키지에서 PX4와 ROS 2가 주고받는 메시지 형식 6개를 가져오는 코드
+
+[px4_msg 리스트1](https://docs.px4.io/main/en/middleware/dds_topics?utm_source=chatgpt.com)
+
+[px4_msg 리스트2](https://github.com/PX4/px4_msgs)
+
+- OffboardControlMode	위치제어인지 자세제어인지 PX4에 알림
+
+- TrajectorySetpoint	이륙 중 목표 위치·고도 전달
+
+- VehicleAttitudeSetpoint	NMPC의 자세와 추력 명령 전달
+
+- VehicleCommand	Offboard 전환, 시동, 착륙 명령
+
+- VehicleLocalPosition	PX4에서 위치와 속도를 받음 (px4 to nmpc)
+
+- VehicleAttitude	PX4에서 현재 자세 quaternion을 받음 (px4 to nmpc)
+
+NMPC는 현재 위치, 속도, 자세가 필요해서 VehicleLocalPosition, VehicleAttitude를 필요로 함. 이륙할때는 px4로 목표 위치를 보내므로 TrajectorySetpoint가 필요한거고, NMPC 전환 후 PX4로 자세와 추력을 보내므로 VehicleAttitudeSetpoint 필요. PX4 에 현재 사용하는 Offboard 제어방식을 알려줘야 하므로 OFFboardControlMode, 그리고 Offboard로 전환, Arm, Land 명령을 보내니까 VehicleCommand.
 
 
 
