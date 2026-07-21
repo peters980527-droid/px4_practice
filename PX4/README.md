@@ -71,9 +71,13 @@ import casadi as ca
 
 [CasADi is an open-source tool for nonlinear optimization and algorithmic differentiation.](https://web.casadi.org/?utm_source=chatgpt.com)
 
+사람이 드론 동역학의 모든 편미분식을 직접 작성하지 않아도 되게끔 수학식을 작성하고 번역하는 설계자
 
+그걸 이제 푸는게 ACADOS
 
+[acados is written in C, but control problems can be conveniently formulated using the CasADi symbolic framework via the high-level acados interfaces to the programming languages Python, MATLAB, and Octave.](https://docs.acados.org/?utm_source=chatgpt.com)
 
+[CasADi 공식 문서에서 symbolic framework와 자동 미분 확인하기](https://web.casadi.org/docs/?utm_source=chatgpt.com)
 
 
 
