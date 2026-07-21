@@ -171,7 +171,15 @@ N   = 20
 CTRL_HZ = 50
 CTRL_DT = 1.0 / CTRL_HZ
 ```
-`Cd`는 Drag Coefficient, 즉 항력계수. 
+`Cd`는 Drag Coefficient, 즉 항력계수.
+
+1.1의 값은 우선 대중적인 값을 쓴거고 측정하는 방법은 ...
+
+`A_f`값도 실측한게 아닌 `drag_coeff = 0.5 * rho * Cd * A_f / m` 공식에서 역산해서 구해낸것 (Cd가 1.1 이라고 가정하고).
+
+`tau`는 time constant임. 응답속도를 나타낸 숫자. 단위는 초(s). 이것도 0.3으로 가정한거고 정확한 측정은 직접 roll pitch 명령을 주고 반응을 재야함. 나중에.
+
+`dt`
 
 
 
