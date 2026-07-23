@@ -203,6 +203,13 @@ CTRL_DT = 1.0 / CTRL_HZ
 
 주기를 50으로 한 이유는 우선 가정해서 빠르게 한것. 나중에 실험으로 callback 해서 계산 속도를 재야할듯. 50hz 면 전체 계산 과정이 20ms 안에 안정적으로 끝나야함.
 
+```python
+THRUST_MIN_N = (THRUST_MIN / HOVER_THRUST) * m * g
+THRUST_MAX_N = (THRUST_MAX / HOVER_THRUST) * m * g
+```
+`THRUST_MIN_N`은 PX4에서 쓰는 정규화된 추력(최소)을 NMPC가 쓰는 Newton으로 변환해주는 것. PX4에 이미 min으로 0.35, max로 0.92를 쓰니까 NMPC도 동일하게 이걸 알고 있어야함.
+min은 필요없다고 생각할 수 있는데 그러면 만약 추력이 0이 되는 계산이 나오면 드론은 자유낙하를 함. 최소한 랜딩할 수 있게 0.35로 제한을 두는것.
+[The thrust is considered to be non-negative and limited according to 0 ≤ T (t) ≤ Tmax, for all t ∈ R≥0, (8) where Tmax > g is the maximal thrust.](https://heemels.tue.nl/content/papers/AndLef_TAC24a.pdf)
 
 
 
