@@ -208,10 +208,18 @@ THRUST_MIN_N = (THRUST_MIN / HOVER_THRUST) * m * g
 THRUST_MAX_N = (THRUST_MAX / HOVER_THRUST) * m * g
 ```
 `THRUST_MIN_N`은 PX4에서 쓰는 정규화된 추력(최소)을 NMPC가 쓰는 Newton으로 변환해주는 것. PX4에 이미 min으로 0.35, max로 0.92를 쓰니까 NMPC도 동일하게 이걸 알고 있어야함.
+
 min은 필요없다고 생각할 수 있는데 그러면 만약 추력이 0이 되는 계산이 나오면 드론은 자유낙하를 함. 최소한 랜딩할 수 있게 0.35로 제한을 두는것.
+
 [The thrust is considered to be non-negative and limited according to 0 ≤ T (t) ≤ Tmax, for all t ∈ R≥0, (8) where Tmax > g is the maximal thrust.](https://heemels.tue.nl/content/papers/AndLef_TAC24a.pdf)
 
+`THRUST_MAX_N`도 마찬가지로 max 로 설정한 0.92를 NMPC가 알 수 있게 변환해주는 식.
 
+NMPC가 1 이상의 추력을 계산해버리면 예측이 완전히 틀려버리기 때문에 (모터 최대 추력은 1) 제한을 둬야함. [Furthermore, rotor saturation should be properly addressed in a controller to avoid performance degradation or even instability due to a gap between the commanded input and the actual input during saturation.](https://arxiv.org/abs/2404.11320)
+
+또한 드론이 기울었을때 모터마다 내는 출력이 다르게 되는데 이미 총추력을 쓰는중이라면 기울여서 대응을 못함. 배터리, 모터 과부화 등등 안전 문제도 있어서 0.85 에서 0.92 가 적당한듯.
+
+[If mixing becomes saturated towards the upper bound the commanded thrust is reduced to ensure that no motor is commanded to deliver more than 100% thrust.](https://docs.px4.io/main/en/config_mc/pid_tuning_guide_multicopter)
 
 
 
