@@ -294,6 +294,37 @@ p_sym = ca.vertcat(wx, wy, wz, psi_ref)
 
 `psi_ref`는 유지하고 싶은 기준 yaw. yaw는 px4에서 알려주기 때문에 외부 설정값임. 그래서 바람과 함께 외부 입력값으로 들어감.
 
+```python
+vrel_x = vx - wx;  vrel_y = vy - wy;  vrel_z = vz - wz
+drag_coeff = 0.5 * rho * Cd * A_f / m
+```
+`vrel`은 상대속도. 예를들어 x축에서 드론속도 vx = 2, 바람속도 -3 ==> vrel 은 5m/s. 즉, 드론은 공기를 5m/s 로 맞는 것처럼 느낌.
+
+`drag_coeff`는 항력계수가 아닌 (항력계수는 Cd임!) 공기밀도, 면적, 질량까지 포함한 계산용 계수인데 상대속도를 항력 가속도로 바꿔주는 비례계수임. 상대속도는 매번 바뀌니까 그거만 빼고 식을 좀더 간단하고 짧게 만들려고 따로 저장해놓는거임 매번 계산안해도 되게끔. 원래 항력 가속도 형태가 <img width="284" height="93" alt="image" src="https://github.com/user-attachments/assets/a1e0d6d3-cb8f-44a9-a5b6-c3ca881779b6" /> 이 형태임
+
+앞부분 <img width="121" height="70" alt="image" src="https://github.com/user-attachments/assets/30f2dd68-aa7e-4121-b282-9f56ef0426b8" /> 을 따로 drag coeff로 저장한것.
+
+여기서 Cd는 우선 임의의 값임. 측정하면 더 좋긴한데...
+
+```python
+ax = -(T/m)*(ca.cos(phi)*ca.sin(theta)*ca.cos(psi) + ca.sin(phi)*ca.sin(psi)) - drag_coeff*vrel_x*ca.sqrt(vrel_x**2 + 0.01)
+ay = -(T/m)*(ca.cos(phi)*ca.sin(theta)*ca.sin(psi) - ca.sin(phi)*ca.cos(psi)) - drag_coeff*vrel_y*ca.sqrt(vrel_y**2 + 0.01)
+az =  (T/m)*ca.cos(phi)*ca.cos(theta) - g - drag_coeff*vrel_z*ca.sqrt(vrel_z**2 + 0.01)
+```
+우선 여기서 구하는 가속도는  nmpc에서 미래를 예측할때 필요한 가속도를 구하려는 것. 그리고 실제 가속도를 구하는 공식이기도 함.
+
+흐름은 우선 추력 자세 바람 후보들로 ax를 계산하고 그 ax로 미래 속도 vx, 위치 px 를 계산하는거임
+
+즉, 실제 가속도를 나타내는 물리 기반 식이지만, Cd, 면적, 추력 등이 정확하지 않으면 센서가 측정한 실제 가속도와 완벽히 똑같을 수는 없음.
+
+PX4에도 가속도를 측정하는 센서가 있지만 이건 현재 상태의 가속도만 알려줄뿐, 미래를 예측하는 용도로는 사용될수 없음.
+
+[Quan Quan Introduction to Multicopter Design and Control](https://www.researchgate.net/profile/Quan-Quan-2/publication/350758388_Correction_to_Multicopter_Design_and_Control_Practice/links/652f92cdb5c77c79f9c415b4/Correction-to-Multicopter-Design-and-Control-Practice.pdf?__cf_chl_tk=vbyK_8sqOiUumbGgMPN30Xxyq5dRXm0i40C7bAwr4N8-1784863972-1.0.1.1-UYe_3FTHNDoK4KdR.jk2aTRzDXjcEvUHVYTzPvCpoKI) 를 보면 <img width="323" height="80" alt="image" src="https://github.com/user-attachments/assets/f3144c88-6780-4c72-9a22-00d0c57b3747" /> 의 식이 나옴. 즉, 가속도 = 중력 + 자세에따라 회전된 추력임. Re3는 회전행렬 식, 즉, 
+<img width="305" height="91" alt="image" src="https://github.com/user-attachments/assets/179491cc-6093-4cfa-9a83-a57ff5d506ce" />
+
+
+
+
 
 
 
