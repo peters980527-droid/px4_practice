@@ -322,6 +322,29 @@ PX4에도 가속도를 측정하는 센서가 있지만 이건 현재 상태의 
 [Quan Quan Introduction to Multicopter Design and Control](https://www.researchgate.net/profile/Quan-Quan-2/publication/350758388_Correction_to_Multicopter_Design_and_Control_Practice/links/652f92cdb5c77c79f9c415b4/Correction-to-Multicopter-Design-and-Control-Practice.pdf?__cf_chl_tk=vbyK_8sqOiUumbGgMPN30Xxyq5dRXm0i40C7bAwr4N8-1784863972-1.0.1.1-UYe_3FTHNDoK4KdR.jk2aTRzDXjcEvUHVYTzPvCpoKI) 를 보면 <img width="323" height="80" alt="image" src="https://github.com/user-attachments/assets/f3144c88-6780-4c72-9a22-00d0c57b3747" /> 의 식이 나옴. 즉, 가속도 = 중력 + 자세에따라 회전된 추력임. Re3는 회전행렬 식, 즉, 
 <img width="305" height="91" alt="image" src="https://github.com/user-attachments/assets/179491cc-6093-4cfa-9a83-a57ff5d506ce" />
 
+나중에 후술할거지만 전체적인 흐름을 보면:
+
+- 미래 바람 wx 입력
+- vrel_x = vx - wx 계산
+- 바람 항력 가속도 계산
+- ax가 바람 방향으로 변함
+- 미래 vx와 px가 밀릴 것으로 예측
+- nmpc가 반대 방향의 roll/pitch를 계산 (추력, pitch, roll 을 이것저것 넣어보면서 베스트 후보들을 만듦. 그중에 cost가 가장 적은거를 뽑는거임)
+- 바람 상쇄
+
+ax drag 는 드론이 바람이 없어도 움직일때 생기는 항력이랑 바람을 줘서 생기는 항력이랑 똑같음.
+
+항력의 원래 공식은 <img width="210" height="65" alt="image" src="https://github.com/user-attachments/assets/93d1b330-9399-47c0-8a53-3ce6a4268d54" />, 그리고 방향까지 포함한 1차원에서는 <img width="312" height="76" alt="image" src="https://github.com/user-attachments/assets/dfe2b498-6a68-4035-b32b-57aafce2c706" /> 로 표현이 가능함. (Multicopter Design and Control Practice의 6.63 식을 참고)
+
+현재 코드에서 쓴 `ca.sqrt(vrel_x**2 + 0.01)` 는 v = 0 부근에서도 함수가 부드럽게 미분되도록 만든 NMPC용 smooth approximation 임. 
+
+[Most Computationally Efficient Smooth Approximation to ∣x∣](https://www.cs.utep.edu/vladik/2013/tr13-44.pdf)
+
+안해도 성능이 저하되거나 그런건 아니지만 간혹 solver가 fail하거나 그럴수 있음.
+
+
+
+
 
 
 
