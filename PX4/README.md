@@ -440,8 +440,11 @@ ax drag 는 드론이 바람이 없어도 움직일때 생기는 항력이랑 �
 
 <img width="606" height="125" alt="image" src="https://github.com/user-attachments/assets/ffbe755e-1b6e-4625-8771-f89e5cd224c7" />
 
+<img width="787" height="575" alt="image" src="https://github.com/user-attachments/assets/f90c49cb-4136-483d-97cf-45b2fddcdbad" />
 
+<img width="229" height="149" alt="image" src="https://github.com/user-attachments/assets/989ed866-0854-436a-9842-27529fbcc38f" />
 
+<img width="192" height="369" alt="image" src="https://github.com/user-attachments/assets/7e93f8fd-fbac-4db4-b3be-59e7afdd8949" />
 
 
 
