@@ -437,5 +437,51 @@ ax drag 는 드론이 바람이 없어도 움직일때 생기는 항력이랑 �
 
 
 
+```python
+f_expr = ca.vertcat(vx, vy, vz, ax, ay, az,
+                    (phi_cmd - phi)/tau, (theta_cmd - theta)/tau, (psi_ref + psi_cmd_delta - psi)/tau,
+                    px, py)
+```
+f_expr는 각 상태의 변화율을 만들어주는 동역학 식. 이거 자체가 다음 상태를 바로 만드는건 아니고 다음에 ACADOS의 ERK 적분기가 이 f_expr을 dt = 0.1초 동안 적분해서 현재 상태 x_k 를 다음 예측 상태 x_k+1 로 만드는것.
+
+```python
+model = AcadosModel()
+model.name = 'quadrotor_nmpc_int'
+model.x = x_sym
+model.u = u_sym
+model.p = p_sym
+model.f_expl_expr = f_expr
+```
+`model = AcadosModel()`는 모델 하나를 만드는것. model.x에는 상태변수들을 넣는거고 u 에는 nmpc가 고를 명령, p에는 외부에서 주는 파라미터. 아직 숫자가 들어가는건 아니고 모양만 만드는거임.
+
+나중에 OCP(모델에 비용함수 제약조건 horizon등을 붙여서 nmpc 문제 전체를 만들어주는 기능)에 넣어야해서 만드는건데 이거는 후에 다룰거임.
+
+model.x, model.u등은 다 model안으로 들어가있는거임. 다음 ocp에서 model을 넣을때 즉, 그 안에 x, u, p, f_expr이 다 들어있는것.
+
+```python
+ocp = AcadosOcp()
+ocp.model = model
+ocp.dims.N = N
+ocp.cost.cost_type   = 'LINEAR_LS'
+ocp.cost.cost_type_e = 'LINEAR_LS'
+```
+`OCP`는 Optimal Control Problem의 약자로 죄적제어문제를 뜻함. 
+
+ocp.model에 model을 넣는데 이 model안에는 이전에 model.x, u, p, f_expr이 다 들어가있음.
+
+OCP에는 Horizon step인 N, cost type 뿐만 아니라 cost 가중치, 제약조건, solver 옵션 등등 더 들어감.
+
+우선 이부분에서는 N이랑 cost type만 설정하는거임. 
+
+[ocp.cost.cost_type   = 'LINEAR_LS'](https://github.com/acados/acados/blob/main/examples/acados_python/pendulum_on_cart/ocp/ocp_example_cost_formulations.py?utm_source=chatgpt.com)  이건 비용 계산 방식을 설정하는거임. LINEAR LS라는 type이
+차이를 제곱하는 방식인데 이게 우리가 쓴 비용식이랑 일치해서 쓰는것.
+
+[ACADOS Python Interface Doc](https://docs.acados.org/python_interface/index.html#acados_template.acados_model.AcadosModel)
+
+cost type e는 마지막 스텝이 제어입력이 따로 없고 최종 상태를 얼마나 잘 만들어놨는지 보는 비용이라 구분해놓은거임. 똑같은 linear ls 방식을 씀. 
+
+
+
+
 
 
