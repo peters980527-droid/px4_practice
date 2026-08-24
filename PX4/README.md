@@ -535,6 +535,16 @@ u_hover = np.array([m*g, 0, 0, 0])
 ocp.cost.yref   = np.concatenate([np.zeros(nx), u_hover])
 ocp.cost.yref_e = np.zeros(nx)
 ```
+이 부분은 NMPC가 목표로 삼을 상태와 입렵값 y_ref를 정하는 부분임. 즉, 지금 보면 호버링이 목표인거임.
+
+```python
+# 추력은 실제 PX4 clip과 일치, yaw offset은 0으로 고정하여 fixed-heading 유지
+ocp.constraints.lbu = np.array([THRUST_MIN_N, -ANGLE_LIM_RAD, -ANGLE_LIM_RAD, 0.0])
+ocp.constraints.ubu = np.array([THRUST_MAX_N,  ANGLE_LIM_RAD,  ANGLE_LIM_RAD, 0.0])
+ocp.constraints.idxbu = np.array([0, 1, 2, 3])
+ocp.constraints.x0 = np.zeros(nx)
+ocp.parameter_values = np.zeros(4)
+```
 
 
 
