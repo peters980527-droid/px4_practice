@@ -481,6 +481,23 @@ OCP에는 Horizon step인 N, cost type 뿐만 아니라 cost 가중치, 제약�
 cost type e는 마지막 스텝이 제어입력이 따로 없고 최종 상태를 얼마나 잘 만들어놨는지 보는 비용이라 구분해놓은거임. 똑같은 linear ls 방식을 씀. 
 
 
+```python
+nx, nu = 11, 4
+ny = nx + nu
+ocp.cost.Vx   = np.zeros((ny, nx));  ocp.cost.Vx[:nx, :] = np.eye(nx)
+ocp.cost.Vu   = np.zeros((ny, nu));  ocp.cost.Vu[nx:, :] = np.eye(nu)
+ocp.cost.Vx_e = np.eye(nx)
+```
+
+
+
+
+
+
+
+
+
+
 
 
 
