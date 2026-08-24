@@ -478,7 +478,9 @@ OCP에는 Horizon step인 N, cost type 뿐만 아니라 cost 가중치, 제약�
 
 [ACADOS Python Interface Doc](https://docs.acados.org/python_interface/index.html#acados_template.acados_model.AcadosModel)
 
-cost type e는 마지막 스텝이 제어입력이 따로 없고 최종 상태를 얼마나 잘 만들어놨는지 보는 비용이라 구분해놓은거임. 똑같은 linear ls 방식을 씀. 
+cost type e는 마지막 스텝이 제어입력이 따로 없고 최종 상태를 얼마나 잘 만들어놨는지 보는 비용이라 구분해놓은거임. 똑같은 linear ls 방식을 씀.
+
+nonlinear ls 도 있지만 이건 지금처럼 원점에서 얼마 떨어졌는지, 즉, 단순 빼기로 하는건 linear로 충분해서 안하는거임. nonlinear ls는 보통 물리량, 속력유지 등 이런거에 쓰인다고함.
 
 
 ```python
@@ -506,14 +508,33 @@ R_diag = np.array([0.01, 10, 10, 10])
 ocp.cost.W   = np.diag(np.concatenate([Q_diag, R_diag]))
 ocp.cost.W_e = 3.0 * np.diag(Q_diag)
 ```
+Q_diag는 11개의 상태에 대한 가중치임. 즉, 숫자가 높을수록 비용을 크게 잡음.
 
+위치와 고도를 유지하는게 주된 목적이기때문에 가중치를 가장 높게 줌. 숫자는 그냥 마음대로 넣고 바꿔가면서 최적의 숫자를 찾는게 베스트임.
 
+80은 z, 즉 고도인데 고도에 더 큰 가중치를 준 이유는 드론이 x y 방향으로 움직이기 위해 roll/pitch를 기울이면 thrust 벡터의 수직방향 성분이 줄어듦. 따라서 추력을 더 늘리지 않으면 고도가 불안정해질수있어서 일부러 더 크게 잡는것.
 
+[To compensate for this loss of altitude, the control accuracy cost associated with the z positional state is increased by increasing the associated element in the Q matrix](https://digital.lib.washington.edu/server/api/core/bitstreams/57ceda05-239b-46b4-a09e-8a38ee52fff2/content)
 
+나중에 bryson's rule을 근거로 지금 코드의 가중치를 정당화할 수 있을듯?
 
+속도는 위치를 맞추는 과정에서 속도도 너무 커지지 않게 보조적으로 억제하는 느낌으로 1정도의 가중치. 자세 0.1은 드론이 바람을 버티려면 계속 기울여야 하니까 가중치를 약하게 준거임.
 
+Q_int는 오차가 얼마나 오래 남아 있었는가를 보는 가중치임.
 
+!!! 가중치는 단위가 다른 변수들끼리는 그 숫자가 의미하는 바가 다름. 예를들어 위치 가중치가 60이라고 속도 가중치 1의 60배가 아니라는 뜻임. 단위에 따라 적용도가 다 다름!!!
 
+R_diag에서 Thrust가 0.1로 낮은 이유는 hover thrust (mg)에서 벗어나는 걸 너무 심하게 벌주지 말고, 필요하면 thrust를 적극적으로 조절해라 라는 의
+
+<img width="400" height="43" alt="image" src="https://github.com/user-attachments/assets/eb7039d2-344e-475c-9f8e-e4ff9ac15a8d" />
+
+이 식에 마지막 w에 들어갈거를 지금 ocp.cost.w에서 하는거임.
+
+```python
+u_hover = np.array([m*g, 0, 0, 0])
+ocp.cost.yref   = np.concatenate([np.zeros(nx), u_hover])
+ocp.cost.yref_e = np.zeros(nx)
+```
 
 
 
