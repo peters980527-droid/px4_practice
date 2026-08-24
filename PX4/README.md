@@ -488,8 +488,24 @@ ocp.cost.Vx   = np.zeros((ny, nx));  ocp.cost.Vx[:nx, :] = np.eye(nx)
 ocp.cost.Vu   = np.zeros((ny, nu));  ocp.cost.Vu[nx:, :] = np.eye(nu)
 ocp.cost.Vx_e = np.eye(nx)
 ```
+nx, nu 는 그냥 상태, 명령 개수. np가 없는 이유는 상태에 이미 반영이 되어있어서 cost에 간접적으로 영향을 주고있기 때문. p는 f_expr에 들어가서 미래상태를 바꾸는데에 반영이 되기때문.
 
+<img width="756" height="61" alt="image" src="https://github.com/user-attachments/assets/2fcc28ca-1c54-461e-b7bc-da0c38b183f4" />
 
+stage cost는 n - 1까지의 명령의 비용이고 terminal은 마지막 스텝의 상태비용. 
+
+이제 식에 들어가있는 Vx, Vu 등을 구해야하는데 그걸 ocp.cost.Vx에서 하는거임.
+
+[109번줄](https://github.com/acados/acados/blob/main/examples/acados_python/pendulum_on_cart/ocp/ocp_example_cost_formulations.py?utm_source=chatgpt.com)
+
+Vx는 상태 11개를 cost 계산에 연결하는 행렬. ACADOS 문서에 다 나와있는거 그대로 쓴거임.
+
+```python
+Q_diag = np.array([Q_POS, Q_POS, 80, 1, 1, 1, 0.1, 0.1, 0.1, Q_INT_EFF, Q_INT_EFF])
+R_diag = np.array([0.01, 10, 10, 10])
+ocp.cost.W   = np.diag(np.concatenate([Q_diag, R_diag]))
+ocp.cost.W_e = 3.0 * np.diag(Q_diag)
+```
 
 
 
