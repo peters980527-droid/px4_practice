@@ -1,0 +1,613 @@
+
+##################################################################################
+
+Tau 측정 코드
+
+##################################################################################
+
+cat > ~/tau_step_node.py << 'EOF'
+"""
+tau identification 비행 노드 (Jetson) — attitude step response
+- 이륙(POSITION offboard) -> HOLD 3초 -> [STEP doublet -> RECENTER] x N_DOUBLETS -> 자동 착륙
+- STEP: attitude offboard로 pitch(또는 roll) +A° 1초 -> -A° 1초 -> 0° 0.5초  (doublet)
+- RECENTER: position offboard로 원위치 복귀, 안정되면 다음 doublet
+- 50Hz CSV 로그 -> ~/nmpc_logs/tau_YYYYMMDD_HHMMSS_<axis>.csv
+- 안전: 위치오차 > POS_ABORT 또는 고도오차 > ALT_ABORT 이면 즉시 LAND
+
+실행 전 확인: VICON/EKF 정상, 팬 OFF, 드론 주변 최소 1.5m 여유
+"""
+
+import os
+import csv
+import time
+from datetime import datetime
+
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+import numpy as np
+from px4_msgs.msg import (
+    OffboardControlMode,
+    TrajectorySetpoint,
+    VehicleAttitudeSetpoint,
+    VehicleCommand,
+    VehicleLocalPosition,
+    VehicleAttitude
+)
+
+# ========================================================
+# ===== 실험 설정 (여기만 바꾸면 됨) =====
+# ========================================================
+STEP_AXIS     = 'pitch'   # 'pitch' 또는 'roll'
+STEP_ANGLE    = 5.0       # step 크기 [deg]  (5 권장, 실내 여유 크면 8까지)
+STEP_DUR      = 1.0       # +A 유지 시간 [s] (= -A 유지 시간)
+STEP_TAIL     = 0.5       # doublet 끝 0° 유지 시간 [s]
+N_DOUBLETS    = 3         # doublet 반복 횟수
+HOLD_BEFORE   = 3.0       # 첫 doublet 전 position hold [s] (무풍 오프셋 측정 구간)
+RECENTER_MAX  = 8.0       # 원위치 복귀 최대 대기 [s]
+POS_ABORT     = 1.5       # 이 거리 넘게 밀리면 착륙 [m]
+ALT_ABORT     = 0.5       # 고도 오차 이 이상이면 착륙 [m]
+# ========================================================
+HOVER_THRUST  = 0.59      # 비행코드와 동일
+TAKEOFF_ALT   = 1.0
+THRUST_MIN    = 0.40
+THRUST_MAX    = 0.80
+KZ_P          = 0.15      # 고도 유지 P (정규화 추력 / m)
+KZ_D          = 0.08      # 고도 유지 D (정규화 추력 / (m/s))
+CTRL_HZ       = 50
+CTRL_DT       = 1.0 / CTRL_HZ
+STEP_ANGLE_RAD = np.radians(STEP_ANGLE)
+
+
+def euler_to_quat(roll, pitch, yaw):
+    cr, sr = np.cos(roll/2), np.sin(roll/2)
+    cp, sp = np.cos(pitch/2), np.sin(pitch/2)
+    cy, sy = np.cos(yaw/2), np.sin(yaw/2)
+    return [float(cr*cp*cy + sr*sp*sy),
+            float(sr*cp*cy - cr*sp*sy),
+            float(cr*sp*cy + sr*cp*sy),
+            float(cr*cp*sy - sr*sp*cy)]
+
+
+def quat_to_euler(q):
+    w, x, y, z = q
+    roll  = np.arctan2(2*(w*x + y*z), 1 - 2*(x*x + y*y))
+    pitch = np.arcsin(np.clip(2*(w*y - z*x), -1, 1))
+    yaw   = np.arctan2(2*(w*z + x*y), 1 - 2*(y*y + z*z))
+    return roll, pitch, yaw
+
+
+def doublet_angle(t_in_step):
+    """doublet 명령 각도 [rad]. t_in_step: STEP 진입 후 경과 초"""
+    if t_in_step < STEP_DUR:
+        return STEP_ANGLE_RAD
+    elif t_in_step < 2.0 * STEP_DUR:
+        return -STEP_ANGLE_RAD
+    else:
+        return 0.0
+
+
+class TauStepNode(Node):
+    def __init__(self):
+        super().__init__('tau_step_node')
+
+        qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST, depth=1)
+
+        self.pos_sub = self.create_subscription(
+            VehicleLocalPosition, '/fmu/out/vehicle_local_position_v1',
+            self.pos_callback, qos)
+        self.att_sub = self.create_subscription(
+            VehicleAttitude, '/fmu/out/vehicle_attitude',
+            self.att_callback, qos)
+
+        self.offboard_pub = self.create_publisher(
+            OffboardControlMode, '/fmu/in/offboard_control_mode', 10)
+        self.traj_pub = self.create_publisher(
+            TrajectorySetpoint, '/fmu/in/trajectory_setpoint', 10)
+        self.att_pub = self.create_publisher(
+            VehicleAttitudeSetpoint, '/fmu/in/vehicle_attitude_setpoint_v1', 10)
+        self.cmd_pub = self.create_publisher(
+            VehicleCommand, '/fmu/in/vehicle_command', 10)
+
+        self.pos_ned = [0.0, 0.0, 0.0]
+        self.vel_ned = [0.0, 0.0, 0.0]
+        self.euler = [0.0, 0.0, 0.0]
+        self.pos_received = False
+        self.att_received = False
+
+        self.phase = 'TAKEOFF'
+        self.counter = 0
+        self.stable_count = 0
+        self.ref_yaw = 0.0
+        self.ref_x = 0.0
+        self.ref_y = 0.0
+        self.takeoff_x = 0.0
+        self.takeoff_y = 0.0
+        self.takeoff_set = False
+        self.land_sent = False
+
+        self.t0_monotonic = None       # HOLD 진입 시각 (로그 t=0)
+        self.phase_start = None        # 현재 phase 진입 시각
+        self.doublet_idx = 0
+        self.recenter_stable = 0
+        self.cmd_roll = 0.0
+        self.cmd_pitch = 0.0
+        self.thrust = HOVER_THRUST
+
+        # ===== CSV 로그 =====
+        os.makedirs(os.path.expanduser('~/nmpc_logs'), exist_ok=True)
+        fname = os.path.expanduser(
+            f"~/nmpc_logs/tau_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{STEP_AXIS}.csv")
+        self.log_file = open(fname, 'w', newline='')
+        self.log_file.write(
+            f"# STEP_AXIS={STEP_AXIS} STEP_ANGLE={STEP_ANGLE} STEP_DUR={STEP_DUR} "
+            f"N_DOUBLETS={N_DOUBLETS} HOVER_THRUST={HOVER_THRUST} TAKEOFF_ALT={TAKEOFF_ALT}\n")
+        self.log_writer = csv.writer(self.log_file)
+        self.log_writer.writerow([
+            't', 'phase', 'doublet',
+            'cmd_roll', 'cmd_pitch',
+            'roll', 'pitch', 'yaw',
+            'x', 'y', 'z', 'vx', 'vy', 'vz',
+            'thrust'])
+        self.get_logger().info(f'CSV log -> {fname}')
+
+        self.timer = self.create_timer(CTRL_DT, self.timer_callback)
+        self.get_logger().info(
+            f'TAU STEP started | axis={STEP_AXIS} | {STEP_ANGLE:.0f}deg doublet x{N_DOUBLETS} | '
+            f'step {STEP_DUR}s')
+
+    # ---------------- callbacks ----------------
+    def pos_callback(self, msg):
+        self.pos_ned = [msg.x, msg.y, msg.z]
+        self.vel_ned = [msg.vx, msg.vy, msg.vz]
+        self.pos_received = True
+
+    def att_callback(self, msg):
+        self.euler = list(quat_to_euler(msg.q))
+        self.att_received = True
+
+    def timer_callback(self):
+        self.counter += 1
+        ts = int(self.get_clock().now().nanoseconds / 1000)
+
+        if self.phase == 'TAKEOFF':
+            self.do_takeoff(ts)
+        elif self.phase == 'HOLD':
+            self.do_hold(ts)
+        elif self.phase == 'STEP':
+            self.do_step(ts)
+        elif self.phase == 'RECENTER':
+            self.do_recenter(ts)
+        elif self.phase == 'LAND':
+            self.do_land(ts)
+
+        if self.phase in ('HOLD', 'STEP', 'RECENTER'):
+            self.write_log()
+
+    # ---------------- helpers ----------------
+    def publish_offboard_mode(self, ts, attitude):
+        mode_msg = OffboardControlMode()
+        mode_msg.position = (not attitude)
+        mode_msg.velocity = False
+        mode_msg.acceleration = False
+        mode_msg.attitude = attitude
+        mode_msg.body_rate = False
+        mode_msg.timestamp = ts
+        self.offboard_pub.publish(mode_msg)
+
+    def publish_position_sp(self, ts):
+        sp = TrajectorySetpoint()
+        sp.position = [self.ref_x, self.ref_y, -TAKEOFF_ALT]
+        sp.yaw = float(self.ref_yaw)
+        sp.timestamp = ts
+        self.traj_pub.publish(sp)
+
+    def publish_attitude_sp(self, ts, roll_cmd, pitch_cmd):
+        # 고도 유지: hover 추력 + 기울기 보정 + P/D
+        z_alt = -self.pos_ned[2]
+        vz_up = -self.vel_ned[2]
+        tilt = max(abs(roll_cmd), abs(pitch_cmd))
+        thrust = HOVER_THRUST / max(np.cos(tilt), 0.9)
+        thrust += KZ_P * (TAKEOFF_ALT - z_alt) - KZ_D * vz_up
+        self.thrust = float(np.clip(thrust, THRUST_MIN, THRUST_MAX))
+
+        att_msg = VehicleAttitudeSetpoint()
+        att_msg.q_d = euler_to_quat(roll_cmd, pitch_cmd, self.ref_yaw)
+        att_msg.thrust_body = [0.0, 0.0, -self.thrust]
+        att_msg.timestamp = ts
+        self.att_pub.publish(att_msg)
+        self.cmd_roll = float(roll_cmd)
+        self.cmd_pitch = float(pitch_cmd)
+
+    def safety_check(self):
+        dx = self.pos_ned[0] - self.ref_x
+        dy = self.pos_ned[1] - self.ref_y
+        dist = float(np.hypot(dx, dy))
+        alt_err = abs(-self.pos_ned[2] - TAKEOFF_ALT)
+        if dist > POS_ABORT or alt_err > ALT_ABORT:
+            self.get_logger().warn(
+                f'ABORT: dist={dist:.2f}m alt_err={alt_err:.2f}m -> LAND')
+            self.phase = 'LAND'
+            return False
+        return True
+
+    def elapsed(self):
+        return time.monotonic() - self.t0_monotonic
+
+    def write_log(self):
+        self.log_writer.writerow([
+            f"{self.elapsed():.3f}", self.phase, self.doublet_idx,
+            f"{np.degrees(self.cmd_roll):.3f}", f"{np.degrees(self.cmd_pitch):.3f}",
+            f"{np.degrees(self.euler[0]):.3f}", f"{np.degrees(self.euler[1]):.3f}",
+            f"{np.degrees(self.euler[2]):.3f}",
+            f"{self.pos_ned[0]:.4f}", f"{self.pos_ned[1]:.4f}", f"{-self.pos_ned[2]:.4f}",
+            f"{self.vel_ned[0]:.4f}", f"{self.vel_ned[1]:.4f}", f"{-self.vel_ned[2]:.4f}",
+            f"{self.thrust:.4f}"])
+
+    # ---------------- phases ----------------
+    def do_takeoff(self, ts):
+        self.publish_offboard_mode(ts, attitude=False)
+
+        if self.pos_received and not self.takeoff_set:
+            self.takeoff_x = self.pos_ned[0]
+            self.takeoff_y = self.pos_ned[1]
+            self.takeoff_set = True
+
+        sp = TrajectorySetpoint()
+        sp.position = [self.takeoff_x, self.takeoff_y, -TAKEOFF_ALT]
+        sp.yaw = 0.0
+        sp.timestamp = ts
+        self.traj_pub.publish(sp)
+
+        if self.counter == int(4.0 * CTRL_HZ):
+            self.set_offboard_mode()
+            self.get_logger().info('Offboard mode requested')
+        if self.counter == int(5.0 * CTRL_HZ):
+            self.arm()
+            self.get_logger().info('Arm requested - Taking off in POSITION mode')
+
+        if self.counter > int(6.0 * CTRL_HZ) and self.pos_received:
+            z_alt = -self.pos_ned[2]
+            vz = -self.vel_ned[2]
+            alt_ok = abs(z_alt - TAKEOFF_ALT) < 0.15
+            vz_ok = abs(vz) < 0.15
+
+            if alt_ok and vz_ok:
+                self.stable_count += 1
+            else:
+                self.stable_count = 0
+
+            if self.counter % CTRL_HZ == 0:
+                print(f"[TAKEOFF] z={z_alt:.2f}m | vz={vz:.2f}m/s | stable={self.stable_count}")
+
+            if self.stable_count >= int(3.0 * CTRL_HZ) and self.att_received:
+                self.ref_yaw = self.euler[2]
+                self.ref_x = self.pos_ned[0]
+                self.ref_y = self.pos_ned[1]
+                self.stable_count = 0
+                self.t0_monotonic = time.monotonic()
+                self.phase_start = time.monotonic()
+                self.phase = 'HOLD'
+                self.get_logger().info(
+                    f'Takeoff complete at {z_alt:.2f}m -> HOLD {HOLD_BEFORE}s')
+
+    def do_hold(self, ts):
+        self.publish_offboard_mode(ts, attitude=False)
+        self.publish_position_sp(ts)
+        self.cmd_roll = 0.0
+        self.cmd_pitch = 0.0
+        self.thrust = HOVER_THRUST
+        if not self.safety_check():
+            return
+        if time.monotonic() - self.phase_start >= HOLD_BEFORE:
+            self.doublet_idx = 1
+            self.phase_start = time.monotonic()
+            self.phase = 'STEP'
+            self.get_logger().info(f'STEP doublet {self.doublet_idx}/{N_DOUBLETS}')
+
+    def do_step(self, ts):
+        self.publish_offboard_mode(ts, attitude=True)
+        t_in = time.monotonic() - self.phase_start
+        ang = doublet_angle(t_in)
+        if STEP_AXIS == 'roll':
+            self.publish_attitude_sp(ts, ang, 0.0)
+        else:
+            self.publish_attitude_sp(ts, 0.0, ang)
+        if not self.safety_check():
+            return
+        if t_in >= 2.0 * STEP_DUR + STEP_TAIL:
+            self.phase_start = time.monotonic()
+            self.recenter_stable = 0
+            self.phase = 'RECENTER'
+            self.get_logger().info('RECENTER')
+
+    def do_recenter(self, ts):
+        self.publish_offboard_mode(ts, attitude=False)
+        self.publish_position_sp(ts)
+        self.cmd_roll = 0.0
+        self.cmd_pitch = 0.0
+        self.thrust = HOVER_THRUST
+        if not self.safety_check():
+            return
+
+        dx = self.pos_ned[0] - self.ref_x
+        dy = self.pos_ned[1] - self.ref_y
+        dist = float(np.hypot(dx, dy))
+        speed = float(np.hypot(self.vel_ned[0], self.vel_ned[1]))
+        alt_err = abs(-self.pos_ned[2] - TAKEOFF_ALT)
+        if dist < 0.15 and speed < 0.15 and alt_err < 0.15:
+            self.recenter_stable += 1
+        else:
+            self.recenter_stable = 0
+
+        t_in = time.monotonic() - self.phase_start
+        if self.counter % CTRL_HZ == 0:
+            print(f"[RECENTER] dist={dist:.2f}m speed={speed:.2f} stable={self.recenter_stable}")
+
+        if self.recenter_stable >= int(1.0 * CTRL_HZ) or t_in >= RECENTER_MAX:
+            if t_in >= RECENTER_MAX:
+                self.get_logger().warn('RECENTER timeout -> proceeding')
+            if self.doublet_idx >= N_DOUBLETS:
+                self.phase = 'LAND'
+                self.get_logger().info('All doublets done -> LAND')
+            else:
+                self.doublet_idx += 1
+                self.phase_start = time.monotonic()
+                self.phase = 'STEP'
+                self.get_logger().info(f'STEP doublet {self.doublet_idx}/{N_DOUBLETS}')
+
+    # ---------------- PX4 commands ----------------
+    def set_offboard_mode(self):
+        msg = VehicleCommand()
+        msg.command = 176;  msg.param1 = 1.0;  msg.param2 = 6.0
+        msg.target_system = 1;  msg.target_component = 1
+        msg.source_system = 1;  msg.source_component = 1
+        msg.from_external = True
+        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        self.cmd_pub.publish(msg)
+
+    def arm(self):
+        msg = VehicleCommand()
+        msg.command = 400;  msg.param1 = 1.0
+        msg.target_system = 1;  msg.target_component = 1
+        msg.source_system = 1;  msg.source_component = 1
+        msg.from_external = True
+        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        self.cmd_pub.publish(msg)
+
+    def land(self):
+        msg = VehicleCommand()
+        msg.command = 21
+        msg.target_system = 1;  msg.target_component = 1
+        msg.source_system = 1;  msg.source_component = 1
+        msg.from_external = True
+        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        self.cmd_pub.publish(msg)
+
+    def do_land(self, ts):
+        if not self.land_sent:
+            self.land()
+            self.land_sent = True
+            self.get_logger().info('NAV_LAND sent - PX4 auto landing')
+
+
+def main():
+    rclpy.init()
+    node = TauStepNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        print("\nTAU STEP stopped")
+    node.log_file.close()
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
+EOF
+
+
+
+
+
+
+
+
+
+
+###############################################################
+
+Tau analysis
+
+###############################################################
+
+"""
+tau_analysis.py — tau_step_node.py 로그(CSV)에서 1차 자세 모델 time constant 추정
+
+사용법:
+    python3 tau_analysis.py ~/nmpc_logs/tau_20260910_143022_pitch.csv
+
+출력:
+    - 각 step의 63% 도달 시간 (t63) 목록 + 평균/표준편차
+    - 1차 모델  d(theta)/dt = (k*theta_cmd - theta)/tau  least-squares fit 결과 (tau, k, delay)
+    - <csv이름>_fit.png  : 명령 vs 실제 vs 모델 겹친 그림 (논문용)
+
+의존성: numpy, matplotlib 만
+"""
+
+import sys
+import os
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+
+def load_csv(path):
+    with open(path) as f:
+        lines = f.readlines()
+    header_line = None
+    for i, ln in enumerate(lines):
+        if not ln.startswith('#'):
+            header_line = i
+            break
+    cols = lines[header_line].strip().split(',')
+    data = {c: [] for c in cols}
+    for ln in lines[header_line + 1:]:
+        parts = ln.strip().split(',')
+        if len(parts) != len(cols):
+            continue
+        for c, v in zip(cols, parts):
+            data[c].append(v)
+    out = {}
+    for c in cols:
+        if c in ('phase',):
+            out[c] = np.array(data[c])
+        else:
+            out[c] = np.array([float(v) for v in data[c]])
+    # 첫 줄 주석에서 STEP_AXIS 읽기
+    axis = 'pitch'
+    if lines[0].startswith('#') and 'STEP_AXIS=roll' in lines[0]:
+        axis = 'roll'
+    return out, axis
+
+
+def first_order_sim(t, u, tau, k, delay, y0=0.0):
+    """이산 1차 모델 시뮬레이션. u: 명령, delay: 순수 지연 [s], y0: 초기 각도"""
+    y = np.zeros_like(u)
+    y[0] = y0
+    dt = np.diff(t, prepend=t[0])
+    dt[0] = dt[1] if len(dt) > 1 else 0.02
+    # 지연된 명령
+    if delay > 0:
+        u_d = np.interp(t - delay, t, u, left=u[0])
+    else:
+        u_d = u
+    for i in range(1, len(t)):
+        y[i] = y[i-1] + dt[i] / tau * (k * u_d[i-1] - y[i-1])
+    return y
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(1)
+    path = os.path.expanduser(sys.argv[1])
+    d, axis = load_csv(path)
+
+    t = d['t']
+    cmd = d['cmd_' + axis]
+    act = d[axis]
+    phase = d['phase']
+
+    # ---- 무풍 HOLD 구간 오프셋 제거 ----
+    hold_mask = phase == 'HOLD'
+    offset = float(np.mean(act[hold_mask])) if hold_mask.any() else 0.0
+    act0 = act - offset
+    print(f"[info] axis={axis}  HOLD offset = {offset:+.3f} deg  (제거함)")
+
+    # ---- STEP 구간만 사용 (RECENTER는 position mode라 제외) ----
+    step_mask = phase == 'STEP'
+    if not step_mask.any():
+        print("STEP 구간이 없습니다."); sys.exit(1)
+
+    # ---- (1) 각 step edge 에서 63% 도달 시간 ----
+    edges = np.where(np.abs(np.diff(cmd)) > 0.5)[0] + 1   # 명령이 바뀐 인덱스
+    t63_list = []
+    print("\n[63% method]")
+    for e in edges:
+        u_before = cmd[e-1]
+        u_after = cmd[e]
+        if abs(u_after - u_before) < 0.5:
+            continue
+        y0 = act0[e-1]
+        target = y0 + 0.632 * (u_after - y0)
+        # e 이후 1.0초 안에서 target 통과 시점
+        win = (t >= t[e]) & (t <= t[e] + 1.0)
+        idx = np.where(win)[0]
+        found = None
+        for i in idx:
+            if (u_after > u_before and act0[i] >= target) or \
+               (u_after < u_before and act0[i] <= target):
+                found = i
+                break
+        if found is None:
+            print(f"  t={t[e]:6.2f}s  {u_before:+.1f}->{u_after:+.1f} deg : 63% 미도달 (skip)")
+            continue
+        t63 = t[found] - t[e]
+        t63_list.append(t63)
+        print(f"  t={t[e]:6.2f}s  {u_before:+.1f}->{u_after:+.1f} deg : t63 = {t63:.3f} s")
+    if t63_list:
+        print(f"  => tau_63 = {np.mean(t63_list):.3f} ± {np.std(t63_list):.3f} s  (n={len(t63_list)})")
+    else:
+        print("  => 63% 방법 결과 없음")
+
+    # ---- (2) least-squares fit: tau, k, delay grid search ----
+    ts = t[step_mask]; us = cmd[step_mask]; ys = act0[step_mask]
+    # doublet 사이 RECENTER가 빠져 시간이 점프하므로 doublet별로 나눠 시뮬
+    dbl = d['doublet'][step_mask]
+    segs = [np.where(dbl == n)[0] for n in np.unique(dbl)]
+
+    def cost(tau, k, delay):
+        err = 0.0
+        for s in segs:
+            tt = ts[s]; uu = us[s]; yy = ys[s]
+            ym = first_order_sim(tt, uu, tau, k, delay, y0=yy[0])
+            err += np.sum((ym - yy)**2)
+        return err
+
+    taus = np.arange(0.05, 1.001, 0.01)
+    ks = np.arange(0.80, 1.201, 0.02)
+    delays = np.arange(0.0, 0.151, 0.01)
+    best = (None, np.inf)
+    for delay in delays:
+        for k in ks:
+            for tau in taus:
+                c = cost(tau, k, delay)
+                if c < best[1]:
+                    best = ((tau, k, delay), c)
+    (tau_fit, k_fit, delay_fit), c_best = best
+    rmse = np.sqrt(c_best / len(ts))
+    print("\n[least-squares fit]")
+    print(f"  tau   = {tau_fit:.3f} s")
+    print(f"  k     = {k_fit:.3f}")
+    print(f"  delay = {delay_fit:.3f} s")
+    print(f"  RMSE  = {rmse:.3f} deg")
+
+    # delay 없는 순수 1차 fit도 같이 (코드에는 delay 항이 없으므로)
+    best0 = (None, np.inf)
+    for k in ks:
+        for tau in taus:
+            c = cost(tau, k, 0.0)
+            if c < best0[1]:
+                best0 = ((tau, k), c)
+    (tau0, k0), c0 = best0
+    print(f"  (delay=0 강제) tau = {tau0:.3f} s, k = {k0:.3f}, RMSE = {np.sqrt(c0/len(ts)):.3f} deg")
+    print(f"\n  => 코드에 넣을 값 권장: tau = {tau0:.2f}  (delay를 tau에 흡수한 값)")
+
+    # ---- 그림 ----
+    fig, axes = plt.subplots(len(segs), 1, figsize=(8, 2.6 * len(segs)), sharex=False)
+    if len(segs) == 1:
+        axes = [axes]
+    for ax_, s in zip(axes, segs):
+        tt = ts[s]; uu = us[s]; yy = ys[s]
+        ym = first_order_sim(tt, uu, tau0, k0, 0.0, y0=yy[0])
+        tt0 = tt - tt[0]
+        ax_.plot(tt0, uu, 'k--', lw=1.2, label='command')
+        ax_.plot(tt0, yy, 'b-', lw=1.5, label='measured')
+        ax_.plot(tt0, ym, 'r-', lw=1.2, label=f'1st-order fit (tau={tau0:.2f}s, k={k0:.2f})')
+        ax_.set_ylabel(f'{axis} [deg]')
+        ax_.grid(alpha=0.3)
+    axes[0].legend(loc='upper right', fontsize=8)
+    axes[-1].set_xlabel('time in doublet [s]')
+    fig.tight_layout()
+    out_png = os.path.splitext(path)[0] + '_fit.png'
+    fig.savefig(out_png, dpi=150)
+    print(f"\n[plot] {out_png}")
+
+
+if __name__ == '__main__':
+    main()
