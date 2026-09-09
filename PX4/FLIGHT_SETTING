@@ -901,9 +901,11 @@ class NMPCController(Node):
                 # ===== CSV 로그 =====
         os.makedirs(os.path.expanduser('~/nmpc_logs'), exist_ok=True)
         tag = (f"fan{FAN_PERCENT:.0f}_prev{'ON' if USE_WIND_PREVIEW else 'OFF'}"
-               f"_int{'ON' if USE_INTEGRAL else 'OFF'}")
-        fname = os.path.expanduser(
-            f"~/nmpc_logs/nmpc_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{tag}.csv")
+            f"_int{'ON' if USE_INTEGRAL else 'OFF'}")
+        logdir = os.path.expanduser('~/nmpc_logs')
+        run = 1 + len([f for f in os.listdir(logdir) if f.startswith('nmpc_') and tag in f])
+        fname = os.path.join(logdir,
+            f"nmpc_{tag}_run{run:02d}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
         self.log_file = open(fname, 'w', newline='')
         self.log_file.write(
             f"# FAN_PERCENT={FAN_PERCENT} WIND_MAX={WIND_MAX} USE_WIND_PREVIEW={USE_WIND_PREVIEW} "
