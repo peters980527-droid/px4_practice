@@ -676,6 +676,8 @@ Wind Preview NMPC 실기 비행 코드 (Jetson) — 적분항 추가 버전
 from std_msgs.msg import Empty
 import os
 import time
+import csv
+from datetime import datetime
 os.environ['ACADOS_SOURCE_DIR'] = os.path.expanduser('~/acados')
 
 import rclpy
@@ -896,6 +898,26 @@ class NMPCController(Node):
         self.int_x = 0.0
         self.int_y = 0.0
 
+                # ===== CSV 로그 =====
+        os.makedirs(os.path.expanduser('~/nmpc_logs'), exist_ok=True)
+        tag = (f"fan{FAN_PERCENT:.0f}_prev{'ON' if USE_WIND_PREVIEW else 'OFF'}"
+               f"_int{'ON' if USE_INTEGRAL else 'OFF'}")
+        fname = os.path.expanduser(
+            f"~/nmpc_logs/nmpc_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{tag}.csv")
+        self.log_file = open(fname, 'w', newline='')
+        self.log_file.write(
+            f"# FAN_PERCENT={FAN_PERCENT} WIND_MAX={WIND_MAX} USE_WIND_PREVIEW={USE_WIND_PREVIEW} "
+            f"USE_INTEGRAL={USE_INTEGRAL} Q_INT={Q_INT_EFF} tau={tau} Cd={Cd} A_f={A_f} m={m} "
+            f"HOVER_THRUST={HOVER_THRUST} ANGLE_LIM={ANGLE_LIM} Q_POS={Q_POS} N={N} dt={dt}\n")
+        self.log_writer = csv.writer(self.log_file)
+        self.log_writer.writerow([
+            't','wind_true','wind_prev0',
+            'err_x','err_y','z','vx','vy','vz','roll','pitch','yaw','int_x','int_y',
+            'T_raw','roll_raw','pitch_raw','dpsi_raw',
+            'roll_cmd','pitch_cmd','thrust',
+            'solve_ms','status','fallback'])
+        self.get_logger().info(f'CSV log -> {fname}')
+
         self.timer = self.create_timer(CTRL_DT, self.timer_callback)
         self.get_logger().info(
             f'NMPC started | fan {FAN_PERCENT:.0f}% -> {WIND_MAX:.1f} m/s | '
@@ -1055,12 +1077,16 @@ class NMPCController(Node):
             wind_terminal = np.zeros(3)
         solver.set(N, 'p', np.concatenate([wind_terminal, [self.ref_yaw]]))
 
+        t0 = time.perf_counter()
         status = solver.solve()
+        solve_ms = (time.perf_counter() - t0) * 1000.0
         if status != 0:
             self.get_logger().warn(f'Solver failed: status={status}, using hover')
             u_opt = u_hover
+            fallback = 1
         else:
             u_opt = solver.get(0, 'u')
+            fallback = 0
 
         roll_cmd  = float(np.clip(u_opt[1], -ANGLE_LIM_RAD, ANGLE_LIM_RAD))
         pitch_cmd = float(np.clip(u_opt[2], -ANGLE_LIM_RAD, ANGLE_LIM_RAD))
@@ -1077,6 +1103,16 @@ class NMPCController(Node):
         att_msg.thrust_body = [0.0, 0.0, -thrust]
         att_msg.timestamp = ts
         self.att_pub.publish(att_msg)
+
+        wind_prev0 = get_wind(t)[0] if USE_WIND_PREVIEW else 0.0
+        self.log_writer.writerow([
+            f"{t:.3f}", f"{get_wind(t)[0]:.3f}", f"{wind_prev0:.3f}",
+            *[f"{v:.4f}" for v in state[:6]],
+            *[f"{np.degrees(v):.3f}" for v in state[6:9]],
+            f"{state[9]:.4f}", f"{state[10]:.4f}",
+            f"{u_opt[0]:.3f}", f"{np.degrees(u_opt[1]):.3f}", f"{np.degrees(u_opt[2]):.3f}", f"{np.degrees(u_opt[3]):.3f}",
+            f"{np.degrees(roll_cmd):.3f}", f"{np.degrees(pitch_cmd):.3f}", f"{thrust:.4f}",
+            f"{solve_ms:.3f}", status, fallback])
 
         # 0.1초마다 로그 (thr = clip 후 정규화 추력, T = NMPC 요구 N, hover=18.6N)
         if self.counter % int(0.1 * CTRL_HZ) == 0:
@@ -1126,18 +1162,13 @@ def main():
         rclpy.spin(node)
     except KeyboardInterrupt:
         print("\nNMPC stopped")
+    node.log_file.close()
     node.destroy_node()
     rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
 EOF
-
-
-
-
-
-
 
 
 
