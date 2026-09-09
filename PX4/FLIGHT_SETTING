@@ -675,6 +675,7 @@ Wind Preview NMPC 실기 비행 코드 (Jetson) — 적분항 추가 버전
 
 from std_msgs.msg import Empty
 import os
+import time
 os.environ['ACADOS_SOURCE_DIR'] = os.path.expanduser('~/acados')
 
 import rclpy
@@ -695,18 +696,23 @@ from px4_msgs.msg import (
 # ========================================================
 # ===== 실험 설정 (여기만 바꾸면 됨) =====
 # ========================================================
-FAN_PERCENT      = 70.0   # 팬 파워 %  <- laptop/fan_node.py 의 FAN_POWER 와 반드시 동일!
+FAN_PERCENT      = 80.0   # 팬 파워 %  <- laptop/fan_node.py 의 FAN_POWER 와 반드시 동일!
+FAN_DELAY_BEFORE = 3.0    # /wind_start 후 fan_node가 팬을 켜기까지 [s]
+WIND_DURATION    = 20.0   # fan_node의 팬 유지 시간 [s]
 USE_WIND_PREVIEW = False  # preview ON/OFF
 USE_INTEGRAL     = True   # 적분항 ON/OFF
 Q_INT            = 10.0   # 적분 가중치 (VICON 노이즈로 ix 떨리면 5 로)
 INT_LIM          = 2.0    # anti-windup: 적분 누적 한계 [m*s]
 ANGLE_LIM        = 45.0   # roll/pitch 제한 (deg). 90%+ 바람이면 45 권장
+THRUST_MIN       = 0.35   # 정규화 추력 하한
 THRUST_MAX       = 0.92   # 정규화 추력 상한. ANGLE_LIM=45 면 0.92 권장
 Q_POS            = 60.0   # x,y 위치 가중치 (검증값 60)
 # ========================================================
 WIND_MAX      = 16.0 * (FAN_PERCENT / 100.0)   # 100% = 16 m/s 선형 가정
 ANGLE_LIM_RAD = np.radians(ANGLE_LIM)          # solver 제약 + clip 에 함께 사용
 Q_INT_EFF     = Q_INT if USE_INTEGRAL else 0.0
+HOVER_THRUST  = 0.59
+TAKEOFF_ALT   = 1.0
 
 # ========================================================
 # PART 1: ACADOS Solver Setup
@@ -722,6 +728,10 @@ N   = 20
 CTRL_HZ = 50
 CTRL_DT = 1.0 / CTRL_HZ
 
+# 실제 PX4 정규화 추력 clip과 solver의 Newton 제약을 동일하게 맞춤
+THRUST_MIN_N = (THRUST_MIN / HOVER_THRUST) * m * g
+THRUST_MAX_N = (THRUST_MAX / HOVER_THRUST) * m * g
+
 px    = ca.MX.sym('px');    py    = ca.MX.sym('py');    pz    = ca.MX.sym('pz')
 vx    = ca.MX.sym('vx');    vy    = ca.MX.sym('vy');    vz    = ca.MX.sym('vz')
 phi   = ca.MX.sym('phi');   theta = ca.MX.sym('theta'); psi   = ca.MX.sym('psi')
@@ -731,22 +741,24 @@ x_sym = ca.vertcat(px, py, pz, vx, vy, vz, phi, theta, psi, ix, iy)
 T         = ca.MX.sym('T')
 phi_cmd   = ca.MX.sym('phi_cmd')
 theta_cmd = ca.MX.sym('theta_cmd')
-psi_cmd   = ca.MX.sym('psi_cmd')
-u_sym = ca.vertcat(T, phi_cmd, theta_cmd, psi_cmd)
+psi_cmd_delta = ca.MX.sym('psi_cmd_delta')
+u_sym = ca.vertcat(T, phi_cmd, theta_cmd, psi_cmd_delta)
 
 wx = ca.MX.sym('wx'); wy = ca.MX.sym('wy'); wz = ca.MX.sym('wz')
-p_sym = ca.vertcat(wx, wy, wz)
+psi_ref = ca.MX.sym('psi_ref')
+p_sym = ca.vertcat(wx, wy, wz, psi_ref)
 
 vrel_x = vx - wx;  vrel_y = vy - wy;  vrel_z = vz - wz
 drag_coeff = 0.5 * rho * Cd * A_f / m
+v_rel_norm = ca.sqrt(vrel_x**2 + vrel_y**2 + vrel_z**2 + 0.01)
 
-ax = -(T/m)*(ca.cos(phi)*ca.sin(theta)*ca.cos(psi) + ca.sin(phi)*ca.sin(psi)) - drag_coeff*vrel_x*ca.sqrt(vrel_x**2 + 0.01)
-ay = -(T/m)*(ca.cos(phi)*ca.sin(theta)*ca.sin(psi) - ca.sin(phi)*ca.cos(psi)) - drag_coeff*vrel_y*ca.sqrt(vrel_y**2 + 0.01)
-az =  (T/m)*ca.cos(phi)*ca.cos(theta) - g - drag_coeff*vrel_z*ca.sqrt(vrel_z**2 + 0.01)
+ax = -(T/m)*(ca.cos(phi)*ca.sin(theta)*ca.cos(psi) + ca.sin(phi)*ca.sin(psi)) - drag_coeff*v_rel_norm*vrel_x
+ay = -(T/m)*(ca.cos(phi)*ca.sin(theta)*ca.sin(psi) - ca.sin(phi)*ca.cos(psi)) - drag_coeff*v_rel_norm*vrel_y
+az =  (T/m)*ca.cos(phi)*ca.cos(theta) - g - drag_coeff*v_rel_norm*vrel_z
 
 # px, py 는 (현재위치 - 목표) 오차로 들어오므로 ix_dot=px, iy_dot=py 가 오차의 적분
 f_expr = ca.vertcat(vx, vy, vz, ax, ay, az,
-                    (phi_cmd - phi)/tau, (theta_cmd - theta)/tau, (psi_cmd - psi)/tau,
+                    (phi_cmd - phi)/tau, (theta_cmd - theta)/tau, (psi_ref + psi_cmd_delta - psi)/tau,
                     px, py)
 
 model = AcadosModel()
@@ -777,12 +789,12 @@ u_hover = np.array([m*g, 0, 0, 0])
 ocp.cost.yref   = np.concatenate([np.zeros(nx), u_hover])
 ocp.cost.yref_e = np.zeros(nx)
 
-# 각도 제약: ANGLE_LIM 에서 자동 반영 (별도 수정 불필요)
-ocp.constraints.lbu = np.array([0.5*m*g, -ANGLE_LIM_RAD, -ANGLE_LIM_RAD, -0.3])
-ocp.constraints.ubu = np.array([3.0*m*g,  ANGLE_LIM_RAD,  ANGLE_LIM_RAD,  0.3])
+# 추력은 실제 PX4 clip과 일치, yaw offset은 0으로 고정하여 fixed-heading 유지
+ocp.constraints.lbu = np.array([THRUST_MIN_N, -ANGLE_LIM_RAD, -ANGLE_LIM_RAD, 0.0])
+ocp.constraints.ubu = np.array([THRUST_MAX_N,  ANGLE_LIM_RAD,  ANGLE_LIM_RAD, 0.0])
 ocp.constraints.idxbu = np.array([0, 1, 2, 3])
 ocp.constraints.x0 = np.zeros(nx)
-ocp.parameter_values = np.zeros(3)
+ocp.parameter_values = np.zeros(4)
 
 ocp.solver_options.qp_solver = 'PARTIAL_CONDENSING_HPIPM'
 ocp.solver_options.hessian_approx = 'GAUSS_NEWTON'
@@ -798,8 +810,8 @@ print("ACADOS solver ready")
 # ========================================================
 # PART 2: 바람 프로파일 (팬 물리 파라미터 — 전부 실측/설정값)
 # ========================================================
-FAN_CMD_ON    = 3.0    # fan_node 가 ON 명령 보내는 시각 (DELAY_BEFORE)
-FAN_CMD_OFF   = 23.0   # fan_node 가 OFF 명령 보내는 시각 (DELAY_BEFORE+WIND_DURATION)
+FAN_CMD_ON    = FAN_DELAY_BEFORE
+FAN_CMD_OFF   = FAN_DELAY_BEFORE + WIND_DURATION
 FAN_DELAY_ON  = 1.6    # ON 명령 -> 반응 지연 (실측)
 FAN_DELAY_OFF = 0.41   # OFF 명령 -> 감속 지연 (실측)
 WIND_ACCEL    = 3.5    # 상승 가속 (스펙)
@@ -833,8 +845,6 @@ def quat_to_euler(q):
     yaw   = np.arctan2(2*(w*z + x*y), 1 - 2*(y*y + z*z))
     return roll, pitch, yaw
 
-HOVER_THRUST = 0.59
-TAKEOFF_ALT  = 1.0
 
 # ========================================================
 # PART 3: ROS2 Node
@@ -880,6 +890,7 @@ class NMPCController(Node):
         self.takeoff_y = 0.0
         self.takeoff_set = False
         self.land_sent = False
+        self.nmpc_start_monotonic = None
 
         # 적분 상태 (오차 누적)
         self.int_x = 0.0
@@ -975,7 +986,7 @@ class NMPCController(Node):
                 for k in range(N):
                     solver.set(k, 'u', u_init)
 
-                self.nmpc_start_time = self.counter * CTRL_DT
+                self.nmpc_start_monotonic = time.monotonic()
                 self.wind_start_pub.publish(Empty())
 
                 self.phase = 'NMPC'
@@ -985,7 +996,8 @@ class NMPCController(Node):
         if not (self.pos_received and self.att_received):
             return
 
-        if (self.counter * CTRL_DT - self.nmpc_start_time) > 35.0:
+        t = time.monotonic() - self.nmpc_start_monotonic
+        if t > 35.0:
             self.phase = 'LAND'
             self.get_logger().info('NMPC 종료 -> 자동 착륙')
             return
@@ -1025,8 +1037,6 @@ class NMPCController(Node):
         ref[2] = TAKEOFF_ALT
         ref[8] = self.ref_yaw
 
-        t = self.counter * CTRL_DT - self.nmpc_start_time
-
         solver.set(0, 'lbx', state)
         solver.set(0, 'ubx', state)
 
@@ -1037,12 +1047,13 @@ class NMPCController(Node):
                 wind_k = get_wind(t + k * dt)
             else:
                 wind_k = np.zeros(3)
-            solver.set(k, 'p', wind_k)
+            solver.set(k, 'p', np.concatenate([wind_k, [self.ref_yaw]]))
         solver.set(N, 'yref', ref)
         if USE_WIND_PREVIEW:
-            solver.set(N, 'p', get_wind(t + N * dt))
+            wind_terminal = get_wind(t + N * dt)
         else:
-            solver.set(N, 'p', np.zeros(3))
+            wind_terminal = np.zeros(3)
+        solver.set(N, 'p', np.concatenate([wind_terminal, [self.ref_yaw]]))
 
         status = solver.solve()
         if status != 0:
@@ -1056,11 +1067,13 @@ class NMPCController(Node):
 
         thrust = float(np.clip(
             (u_opt[0] / (m * g)) * HOVER_THRUST,
-            0.35, THRUST_MAX
+            THRUST_MIN, THRUST_MAX
         ))
 
+        yaw_cmd = float((self.ref_yaw + u_opt[3] + np.pi) % (2*np.pi) - np.pi)
+
         att_msg = VehicleAttitudeSetpoint()
-        att_msg.q_d = euler_to_quat(roll_cmd, pitch_cmd, self.ref_yaw)
+        att_msg.q_d = euler_to_quat(roll_cmd, pitch_cmd, yaw_cmd)
         att_msg.thrust_body = [0.0, 0.0, -thrust]
         att_msg.timestamp = ts
         self.att_pub.publish(att_msg)
@@ -1070,8 +1083,8 @@ class NMPCController(Node):
             wnt = get_wind(t)[0]
             print(f"[DEBUG] t={t:5.2f} wnt={wnt:5.1f} | x={state[0]:+.3f} y={state[1]:+.3f} z={state[2]:.3f} | "
                   f"vx={state[3]:+.3f} vy={state[4]:+.3f} | "
-                  f"roll={np.degrees(state[6]):+.1f} pitch={np.degrees(state[7]):+.1f} yaw={np.degrees(state[8]):+.1f} | "
-                  f"ix={self.int_x:+.2f} | thr={thrust:.3f} T={u_opt[0]:5.1f}N")
+                  f"roll={np.degrees(state[6]):+.1f} pitch={np.degrees(state[7]):+.1f} yaw={np.degrees(state[8]):+.1f} "
+                  f"yaw_cmd={np.degrees(yaw_cmd):+.1f} | ix={self.int_x:+.2f} | thr={thrust:.3f} T={u_opt[0]:5.1f}N")
 
     def set_offboard_mode(self):
         msg = VehicleCommand()
