@@ -712,7 +712,7 @@ YAW_SETPOINT_DEG = 0.0    # 기수 방향 [deg], 0 = wall 정면. yaw 실험: 45
 PREVIEW_GAIN     = 1.0    # 크기 오차: NMPC 가 믿는 풍속 = 실제 x GAIN
 PREVIEW_SHIFT    = 0.0    # 타이밍 오차 [s]: + 면 NMPC 가 바람이 실제보다 늦게 온다고 믿음
 PREVIEW_NOISE    = 0.0    # 노이즈 σ [m/s], 매 스텝 각 stage 에 독립 가우시안
-PREVIEW_LEAD     = None   # 예측 가능 시간 [s]: None = horizon 전체(2.0). 예: 0.5 -> 0.5s 이후는 0 으로
+PREVIEW_LEAD     = None   # 예측 가능 시간 [s]: None = horizon 전체(2.0). 예: 0.5 -> 0.5s 이후는 0.5s 값 유지
 NOISE_SEED       = None   # None 이면 시각 기반 자동, 로그 헤더에 기록
 
 # --- model mismatch (실험 3): NMPC 모델의 Cd·A 만 스케일 (실제 드론은 그대로) ---
@@ -839,7 +839,7 @@ print("ACADOS solver ready")
 # ========================================================
 FAN_CMD_ON    = FAN_DELAY_BEFORE
 FAN_CMD_OFF   = FAN_DELAY_BEFORE + WIND_DURATION
-FAN_DELAY_ON  = 1.6    # ON 명령 -> 반응 지연 (실측)
+FAN_DELAY_ON  = 1.6    # ON 명령 -> 반응 지연. sweep 로그상 ~1s 이른 것으로 보임 -> PREVIEW_SHIFT=+1.0 테스트 후 확정 예정
 FAN_DELAY_OFF = 0.41   # OFF 명령 -> 감속 지연 (실측)
 WIND_ACCEL    = 3.5    # 상승 가속 (스펙)
 WIND_DECEL    = 2.0    # 하강 감속 (실측 8/3.96)
@@ -861,9 +861,10 @@ def get_wind_preview(t_now, k):
     실제 바람(get_wind) 은 팬이 정하며 여기 설정은 NMPC 의 '믿음' 만 바꾼다."""
     if not USE_WIND_PREVIEW:
         return np.zeros(3)
-    if PREVIEW_LEAD is not None and k * dt > PREVIEW_LEAD + 1e-9:
-        return np.zeros(3)                      # lead 이후는 '모름' = 0
-    w = get_wind(t_now + k * dt - PREVIEW_SHIFT) * PREVIEW_GAIN
+    t_ahead = k * dt
+    if PREVIEW_LEAD is not None and t_ahead > PREVIEW_LEAD + 1e-9:
+        t_ahead = PREVIEW_LEAD                  # lead 이후는 '마지막으로 아는 값 유지' (persistence)
+    w = get_wind(t_now + t_ahead - PREVIEW_SHIFT) * PREVIEW_GAIN
     if PREVIEW_NOISE > 0.0:
         w = w + np.array([RNG.normal(0.0, PREVIEW_NOISE), 0.0, 0.0])
     return w
@@ -1186,6 +1187,8 @@ class NMPCController(Node):
             f"{np.degrees(roll_cmd):.3f}", f"{np.degrees(pitch_cmd):.3f}", f"{thrust:.4f}",
             f"{solve_ms:.3f}", status, fallback,
             f"{self.batt_v:.3f}", f"{self.batt_a:.3f}", f"{self.batt_rem:.3f}"])
+        if self.counter % CTRL_HZ == 0:
+            self.log_file.flush()   # 1초마다 디스크에 기록 (노드가 죽어도 로그 보존)
 
         # 0.1초마다 터미널 출력 (thr = clip 후 정규화 추력, T = NMPC 요구 N)
         if self.counter % int(0.1 * CTRL_HZ) == 0:
