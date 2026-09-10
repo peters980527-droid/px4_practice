@@ -671,7 +671,8 @@ Wind Preview NMPC 실기 비행 코드 (Jetson) — x/y/z 적분항 + 배터리 
 - NMPC 진입 시 /wind_start 발행 -> 노트북 fan_node 가 팬 구동
 - preview: 팬 명령시각 + 실측 동특성으로 계산한 바람 시계열을 MPC에 공급
 - integral: x,y,z 오차 누적 상태 (ix, iy, iz) 로 정상상태 오차 제거
-- 2026-09-10: iz 추가, HOVER_THRUST 0.59 -> 0.639 (18회 무풍 호버 로그 평균), 배터리 전압 로그
+- 2026-09-10: iz 추가, HOVER_THRUST 0.59 -> 0.639 (18회 무풍 호버 로그 평균), 배터리 전압 로그,
+  실험 설정(preview 오차/lead, Cd mismatch, yaw, pulse) 을 설정값으로 통합 -> 이후 코드 동결
 """
 
 from std_msgs.msg import Empty
@@ -702,12 +703,26 @@ from px4_msgs.msg import (
 # ========================================================
 FAN_PERCENT      = 80.0   # 팬 파워 %  <- laptop/fan_node.py 의 FAN_POWER 와 반드시 동일!
 FAN_DELAY_BEFORE = 3.0    # /wind_start 후 fan_node가 팬을 켜기까지 [s]
-WIND_DURATION    = 20.0   # fan_node의 팬 유지 시간 [s]
+WIND_DURATION    = 20.0   # fan_node의 팬 유지 시간 [s]  <- fan_node 와 동일! (gust pulse 실험: 4.0)
 USE_WIND_PREVIEW = False  # preview ON/OFF
 USE_INTEGRAL     = True   # x,y 적분항 ON/OFF (z 적분항은 항상 ON)
+YAW_SETPOINT_DEG = 0.0    # 기수 방향 [deg], 0 = wall 정면. yaw 실험: 45, 90 (|값| <= 135)
+
+# --- preview 품질 (실험 2, 4). 기본값이면 sweep 과 완전히 동일 ---
+PREVIEW_GAIN     = 1.0    # 크기 오차: NMPC 가 믿는 풍속 = 실제 x GAIN
+PREVIEW_SHIFT    = 0.0    # 타이밍 오차 [s]: + 면 NMPC 가 바람이 실제보다 늦게 온다고 믿음
+PREVIEW_NOISE    = 0.0    # 노이즈 σ [m/s], 매 스텝 각 stage 에 독립 가우시안
+PREVIEW_LEAD     = None   # 예측 가능 시간 [s]: None = horizon 전체(2.0). 예: 0.5 -> 0.5s 이후는 0 으로
+NOISE_SEED       = None   # None 이면 시각 기반 자동, 로그 헤더에 기록
+
+# --- model mismatch (실험 3): NMPC 모델의 Cd·A 만 스케일 (실제 드론은 그대로) ---
+CD_SCALE         = 1.0    # 0.7 / 1.3 등. (질량 스케일은 정규화 추력 구조상 Cd 스케일과 등가 -> 별도 항목 없음)
+
+# --- 가중치 / 제약 ---
 Q_INT            = 10.0   # x,y 적분 가중치
 Q_INT_Z          = 10.0   # z 적분 가중치
-INT_LIM          = 2.0    # anti-windup: 적분 누적 한계 [m*s] (x, y, z 공통)
+INT_LIM          = 3.0    # anti-windup: x,y 적분 한계 [m*s] (sweep 최대 1.3 관측 -> 여유)
+INT_LIM_Z        = 1.0    # anti-windup: z 적분 한계 [m*s]
 ANGLE_LIM        = 45.0   # roll/pitch 제한 (deg)
 THRUST_MIN       = 0.35   # 정규화 추력 하한
 THRUST_MAX       = 0.92   # 정규화 추력 상한
@@ -715,10 +730,14 @@ Q_POS            = 60.0   # x,y 위치 가중치 (검증값 60)
 # ========================================================
 WIND_MAX      = 16.0 * (FAN_PERCENT / 100.0)   # 100% = 16 m/s 선형 가정 (공칭값)
 ANGLE_LIM_RAD = np.radians(ANGLE_LIM)
-Q_INT_EFF     = Q_INT   if USE_INTEGRAL else 0.0
+YAW_SP_RAD    = float(np.radians(YAW_SETPOINT_DEG))
+Q_INT_EFF     = Q_INT if USE_INTEGRAL else 0.0
 Q_INT_Z_EFF   = Q_INT_Z   # z 적분항은 항상 ON (USE_INTEGRAL 은 x,y 만 제어)
 HOVER_THRUST  = 0.639     # 18회 무풍 호버 로그 평균 (범위 0.60~0.66, 배터리 상태에 따라 변동 -> iz 가 보상)
 TAKEOFF_ALT   = 1.0
+if NOISE_SEED is None:
+    NOISE_SEED = int(time.time()) % 100000
+RNG = np.random.default_rng(NOISE_SEED)
 
 # ========================================================
 # PART 1: ACADOS Solver Setup
@@ -726,7 +745,7 @@ TAKEOFF_ALT   = 1.0
 m   = 1.9
 g   = 9.81
 Cd  = 1.1
-A_f = 0.0755     # Cd*A_f = 0.083 m^2 (2026-09-09 바람 호버 identification)
+A_f = 0.0755     # Cd*A_f = 0.083 m^2 (2026-09-09 바람 호버 identification, 공칭 풍속 기준)
 rho = 1.225
 tau = 0.25       # 2026-09-09 step response identification
 dt  = 0.1
@@ -755,7 +774,7 @@ psi_ref = ca.MX.sym('psi_ref')
 p_sym = ca.vertcat(wx, wy, wz, psi_ref)
 
 vrel_x = vx - wx;  vrel_y = vy - wy;  vrel_z = vz - wz
-drag_coeff = 0.5 * rho * Cd * A_f / m
+drag_coeff = 0.5 * rho * (Cd * A_f * CD_SCALE) / m   # CD_SCALE: mismatch 실험용
 v_rel_norm = ca.sqrt(vrel_x**2 + vrel_y**2 + vrel_z**2 + 0.01)
 
 ax = -(T/m)*(ca.cos(phi)*ca.sin(theta)*ca.cos(psi) + ca.sin(phi)*ca.sin(psi)) - drag_coeff*v_rel_norm*vrel_x
@@ -836,6 +855,20 @@ def get_wind(t):
         w_at_fall = min(WIND_MAX, WIND_ACCEL * (fall_start - rise_start))
         w = max(0.0, w_at_fall - WIND_DECEL * (t - fall_start))
     return np.array([-w, 0.0, 0.0])   # 실기: 팬이 드론을 -x 로 밈
+
+def get_wind_preview(t_now, k):
+    """NMPC 에 공급하는 preview (stage k, 시각 t_now + k*dt). 실험 2/4 의 오차·제한 적용.
+    실제 바람(get_wind) 은 팬이 정하며 여기 설정은 NMPC 의 '믿음' 만 바꾼다."""
+    if not USE_WIND_PREVIEW:
+        return np.zeros(3)
+    if PREVIEW_LEAD is not None and k * dt > PREVIEW_LEAD + 1e-9:
+        return np.zeros(3)                      # lead 이후는 '모름' = 0
+    w = get_wind(t_now + k * dt - PREVIEW_SHIFT) * PREVIEW_GAIN
+    if PREVIEW_NOISE > 0.0:
+        w = w + np.array([RNG.normal(0.0, PREVIEW_NOISE), 0.0, 0.0])
+    return w
+
+NMPC_END = FAN_CMD_OFF + 12.0   # 팬 OFF 후 12초 (정착 관찰) 뒤 착륙
 
 def euler_to_quat(roll, pitch, yaw):
     cr, sr = np.cos(roll/2), np.sin(roll/2)
@@ -920,15 +953,26 @@ class NMPCController(Node):
         os.makedirs(logdir, exist_ok=True)
         tag = (f"fan{FAN_PERCENT:.0f}_prev{'ON' if USE_WIND_PREVIEW else 'OFF'}"
                f"_int{'ON' if USE_INTEGRAL else 'OFF'}")
-        run = 1 + len([f for f in os.listdir(logdir) if f.startswith('nmpc_') and tag in f])
+        # 기본값이 아닌 실험 설정은 파일명에 표시 (run 번호가 조건별로 따로 세어지도록)
+        if PREVIEW_GAIN != 1.0:    tag += f"_g{PREVIEW_GAIN:g}"
+        if PREVIEW_SHIFT != 0.0:   tag += f"_s{PREVIEW_SHIFT:+g}"
+        if PREVIEW_NOISE != 0.0:   tag += f"_n{PREVIEW_NOISE:g}"
+        if PREVIEW_LEAD is not None: tag += f"_L{PREVIEW_LEAD:g}"
+        if CD_SCALE != 1.0:        tag += f"_cd{CD_SCALE:g}"
+        if YAW_SETPOINT_DEG != 0.0: tag += f"_yaw{YAW_SETPOINT_DEG:g}"
+        if WIND_DURATION != 20.0:  tag += f"_dur{WIND_DURATION:g}"
+        run = 1 + len([f for f in os.listdir(logdir) if f.startswith(f'nmpc_{tag}_run')])
         fname = os.path.join(logdir,
             f"nmpc_{tag}_run{run:02d}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
         self.log_file = open(fname, 'w', newline='')
         self.log_file.write(
             f"# FAN_PERCENT={FAN_PERCENT} WIND_MAX={WIND_MAX} USE_WIND_PREVIEW={USE_WIND_PREVIEW} "
-            f"USE_INTEGRAL={USE_INTEGRAL} Q_INT={Q_INT_EFF} Q_INT_Z={Q_INT_Z_EFF} INT_LIM={INT_LIM} "
-            f"tau={tau} Cd={Cd} A_f={A_f} m={m} HOVER_THRUST={HOVER_THRUST} "
-            f"ANGLE_LIM={ANGLE_LIM} THRUST_MAX={THRUST_MAX} Q_POS={Q_POS} N={N} dt={dt}\n")
+            f"USE_INTEGRAL={USE_INTEGRAL} Q_INT={Q_INT_EFF} Q_INT_Z={Q_INT_Z_EFF} INT_LIM={INT_LIM} INT_LIM_Z={INT_LIM_Z} "
+            f"tau={tau} Cd={Cd} A_f={A_f} CD_SCALE={CD_SCALE} m={m} HOVER_THRUST={HOVER_THRUST} "
+            f"ANGLE_LIM={ANGLE_LIM} THRUST_MAX={THRUST_MAX} Q_POS={Q_POS} N={N} dt={dt} "
+            f"PREVIEW_GAIN={PREVIEW_GAIN} PREVIEW_SHIFT={PREVIEW_SHIFT} PREVIEW_NOISE={PREVIEW_NOISE} "
+            f"PREVIEW_LEAD={PREVIEW_LEAD} NOISE_SEED={NOISE_SEED} YAW_SETPOINT_DEG={YAW_SETPOINT_DEG} "
+            f"WIND_DURATION={WIND_DURATION} FAN_DELAY_ON={FAN_DELAY_ON} WIND_ACCEL={WIND_ACCEL}\n")
         self.log_writer = csv.writer(self.log_file)
         self.log_writer.writerow([
             't', 'wind_true', 'wind_prev0',
@@ -944,7 +988,8 @@ class NMPCController(Node):
         self.get_logger().info(
             f'NMPC started | fan {FAN_PERCENT:.0f}% -> {WIND_MAX:.1f} m/s | '
             f'preview={USE_WIND_PREVIEW} | integral={USE_INTEGRAL} (Q_INT={Q_INT_EFF}, Q_INT_Z={Q_INT_Z_EFF}) | '
-            f'hover_thrust={HOVER_THRUST} | angle {ANGLE_LIM:.0f}deg | thrust<= {THRUST_MAX}')
+            f'hover_thrust={HOVER_THRUST} | angle {ANGLE_LIM:.0f}deg | thrust<= {THRUST_MAX} | '
+            f'gain={PREVIEW_GAIN} shift={PREVIEW_SHIFT} noise={PREVIEW_NOISE} lead={PREVIEW_LEAD} cd_scale={CD_SCALE} yaw={YAW_SETPOINT_DEG}')
 
     def pos_callback(self, msg):
         self.pos_ned = [msg.x, msg.y, msg.z]
@@ -988,7 +1033,7 @@ class NMPCController(Node):
 
         sp = TrajectorySetpoint()
         sp.position = [self.takeoff_x, self.takeoff_y, -TAKEOFF_ALT]
-        sp.yaw = 0.0
+        sp.yaw = YAW_SP_RAD
         sp.timestamp = ts
         self.traj_pub.publish(sp)
 
@@ -1004,16 +1049,18 @@ class NMPCController(Node):
             vz = -self.vel_ned[2]
             alt_ok = abs(z_alt - TAKEOFF_ALT) < 0.15
             vz_ok = abs(vz) < 0.15
+            yaw_err = (self.euler[2] - YAW_SP_RAD + np.pi) % (2*np.pi) - np.pi
+            yaw_ok = abs(yaw_err) < np.radians(5.0)
 
-            if alt_ok and vz_ok:
+            if alt_ok and vz_ok and yaw_ok:
                 self.stable_count += 1
             else:
                 self.stable_count = 0
 
             if self.counter % CTRL_HZ == 0:
-                print(f"[TAKEOFF] z={z_alt:.2f}m | vz={vz:.2f}m/s | stable={self.stable_count} | V={self.batt_v:.2f}")
+                print(f"[TAKEOFF] z={z_alt:.2f}m | vz={vz:.2f}m/s | yaw={np.degrees(self.euler[2]):+.1f} (sp {YAW_SETPOINT_DEG:+.0f}) | stable={self.stable_count} | V={self.batt_v:.2f}")
 
-            if self.stable_count >= int(3.0 * CTRL_HZ):
+            if self.stable_count >= int(3.0 * CTRL_HZ) and self.att_received:
                 self.ref_yaw = self.euler[2]
                 self.stable_count = 0
                 self.ref_x = self.pos_ned[0]
@@ -1047,7 +1094,7 @@ class NMPCController(Node):
             return
 
         t = time.monotonic() - self.nmpc_start_monotonic
-        if t > 35.0:
+        if t > NMPC_END:
             self.phase = 'LAND'
             self.get_logger().info('NMPC 종료 -> 자동 착륙')
             return
@@ -1070,7 +1117,7 @@ class NMPCController(Node):
         if USE_INTEGRAL:
             self.int_x = float(np.clip(self.int_x + err_x * CTRL_DT, -INT_LIM, INT_LIM))
             self.int_y = float(np.clip(self.int_y + err_y * CTRL_DT, -INT_LIM, INT_LIM))
-        self.int_z = float(np.clip(self.int_z + err_z * CTRL_DT, -INT_LIM, INT_LIM))   # z 는 항상
+        self.int_z = float(np.clip(self.int_z + err_z * CTRL_DT, -INT_LIM_Z, INT_LIM_Z))   # z 는 항상
 
         state = np.array([
             err_x,
@@ -1094,20 +1141,14 @@ class NMPCController(Node):
         solver.set(0, 'lbx', state)
         solver.set(0, 'ubx', state)
 
+        wind_prev0 = get_wind_preview(t, 0)
+        yref_k = np.concatenate([ref, u_hover])
         for k in range(N):
-            yref_k = np.concatenate([ref, u_hover])
             solver.set(k, 'yref', yref_k)
-            if USE_WIND_PREVIEW:
-                wind_k = get_wind(t + k * dt)
-            else:
-                wind_k = np.zeros(3)
+            wind_k = wind_prev0 if k == 0 else get_wind_preview(t, k)
             solver.set(k, 'p', np.concatenate([wind_k, [self.ref_yaw]]))
         solver.set(N, 'yref', ref)
-        if USE_WIND_PREVIEW:
-            wind_terminal = get_wind(t + N * dt)
-        else:
-            wind_terminal = np.zeros(3)
-        solver.set(N, 'p', np.concatenate([wind_terminal, [self.ref_yaw]]))
+        solver.set(N, 'p', np.concatenate([get_wind_preview(t, N), [self.ref_yaw]]))
 
         t0 = time.perf_counter()
         status = solver.solve()
@@ -1136,9 +1177,8 @@ class NMPCController(Node):
         att_msg.timestamp = ts
         self.att_pub.publish(att_msg)
 
-        wind_prev0 = get_wind(t)[0] if USE_WIND_PREVIEW else 0.0
         self.log_writer.writerow([
-            f"{t:.3f}", f"{get_wind(t)[0]:.3f}", f"{wind_prev0:.3f}",
+            f"{t:.3f}", f"{get_wind(t)[0]:.3f}", f"{wind_prev0[0]:.3f}",
             *[f"{v:.4f}" for v in state[:6]],
             *[f"{np.degrees(v):.3f}" for v in state[6:9]],
             f"{state[9]:.4f}", f"{state[10]:.4f}", f"{state[11]:.4f}",
