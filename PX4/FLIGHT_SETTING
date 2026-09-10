@@ -704,7 +704,7 @@ FAN_PERCENT      = 80.0   # 팬 파워 %  <- laptop/fan_node.py 의 FAN_POWER �
 FAN_DELAY_BEFORE = 3.0    # /wind_start 후 fan_node가 팬을 켜기까지 [s]
 WIND_DURATION    = 20.0   # fan_node의 팬 유지 시간 [s]
 USE_WIND_PREVIEW = False  # preview ON/OFF
-USE_INTEGRAL     = True   # 적분항 ON/OFF (x, y, z 모두)
+USE_INTEGRAL     = True   # x,y 적분항 ON/OFF (z 적분항은 항상 ON)
 Q_INT            = 10.0   # x,y 적분 가중치
 Q_INT_Z          = 10.0   # z 적분 가중치
 INT_LIM          = 2.0    # anti-windup: 적분 누적 한계 [m*s] (x, y, z 공통)
@@ -716,7 +716,7 @@ Q_POS            = 60.0   # x,y 위치 가중치 (검증값 60)
 WIND_MAX      = 16.0 * (FAN_PERCENT / 100.0)   # 100% = 16 m/s 선형 가정 (공칭값)
 ANGLE_LIM_RAD = np.radians(ANGLE_LIM)
 Q_INT_EFF     = Q_INT   if USE_INTEGRAL else 0.0
-Q_INT_Z_EFF   = Q_INT_Z if USE_INTEGRAL else 0.0
+Q_INT_Z_EFF   = Q_INT_Z   # z 적분항은 항상 ON (USE_INTEGRAL 은 x,y 만 제어)
 HOVER_THRUST  = 0.639     # 18회 무풍 호버 로그 평균 (범위 0.60~0.66, 배터리 상태에 따라 변동 -> iz 가 보상)
 TAKEOFF_ALT   = 1.0
 
@@ -1070,7 +1070,7 @@ class NMPCController(Node):
         if USE_INTEGRAL:
             self.int_x = float(np.clip(self.int_x + err_x * CTRL_DT, -INT_LIM, INT_LIM))
             self.int_y = float(np.clip(self.int_y + err_y * CTRL_DT, -INT_LIM, INT_LIM))
-            self.int_z = float(np.clip(self.int_z + err_z * CTRL_DT, -INT_LIM, INT_LIM))
+        self.int_z = float(np.clip(self.int_z + err_z * CTRL_DT, -INT_LIM, INT_LIM))   # z 는 항상
 
         state = np.array([
             err_x,
