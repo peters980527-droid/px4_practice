@@ -75,6 +75,22 @@ sed -i 's/FAN_PERCENT      = .*/FAN_PERCENT      = 70.0   # 팬 파워 %/' ~/nmp
 sed -i 's/ANGLE_LIM        = .*/ANGLE_LIM        = 45.0   # roll\/pitch 제한 (deg)/' ~/nmpc_hover_test.py
 #max tilt 각도 바꾸기
 
+
+
+
+
+
+
+# preview shift (테스트용, 끝나면 0.0 으로)
+sed -i 's/PREVIEW_SHIFT    = .*/PREVIEW_SHIFT    = 1.0/' ~/nmpc_hover_test.py
+
+# fan delay 확정할 때
+sed -i 's/FAN_DELAY_ON  = .*/FAN_DELAY_ON  = 2.6/' ~/nmpc_hover_test.py
+
+# 확인
+grep "^FAN_PERCENT\|^USE_\|^PREVIEW_\|^CD_SCALE\|^YAW_SET\|^WIND_DUR\|^FAN_DELAY_ON" ~/nmpc_hover_test.py
+
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 
