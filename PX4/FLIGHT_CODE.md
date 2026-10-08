@@ -1,16 +1,20 @@
 ```python
 cat > ~/nmpc_hover_test.py << 'EOF'
 """
-Wind Preview NMPC 실기 비행 코드 (Jetson) — 적분항 추가 버전
-- 이륙 -> NMPC 20초 호버 -> 자동 착륙
+Wind Preview NMPC 실기 비행 코드 (Jetson) — x/y/z 적분항 + 배터리 로그 버전
+- 이륙 -> NMPC 35초 (팬 3s 후 ON, 20s 유지) -> 자동 착륙
 - NMPC 진입 시 /wind_start 발행 -> 노트북 fan_node 가 팬 구동
 - preview: 팬 명령시각 + 실측 동특성으로 계산한 바람 시계열을 MPC에 공급
-- integral: x,y 오차 누적 상태 (ix, iy) 로 정상상태 오차 제거
+- integral: x,y,z 오차 누적 상태 (ix, iy, iz) 로 정상상태 오차 제거
+- 2026-09-10: iz 추가, HOVER_THRUST 0.59 -> 0.639 (18회 무풍 호버 로그 평균), 배터리 전압 로그,
+  실험 설정(preview 오차/lead, Cd mismatch, yaw, pulse) 을 설정값으로 통합 -> 이후 코드 동결
 """
 
 from std_msgs.msg import Empty
 import os
 import time
+import csv
+from datetime import datetime
 os.environ['ACADOS_SOURCE_DIR'] = os.path.expanduser('~/acados')
 
 import rclpy
@@ -25,7 +29,8 @@ from px4_msgs.msg import (
     VehicleAttitudeSetpoint,
     VehicleCommand,
     VehicleLocalPosition,
-    VehicleAttitude
+    VehicleAttitude,
+    BatteryStatus
 )
 
 # ========================================================
@@ -33,21 +38,41 @@ from px4_msgs.msg import (
 # ========================================================
 FAN_PERCENT      = 80.0   # 팬 파워 %  <- laptop/fan_node.py 의 FAN_POWER 와 반드시 동일!
 FAN_DELAY_BEFORE = 3.0    # /wind_start 후 fan_node가 팬을 켜기까지 [s]
-WIND_DURATION    = 20.0   # fan_node의 팬 유지 시간 [s]
+WIND_DURATION    = 20.0   # fan_node의 팬 유지 시간 [s]  <- fan_node 와 동일! (gust pulse 실험: 4.0)
 USE_WIND_PREVIEW = False  # preview ON/OFF
-USE_INTEGRAL     = True   # 적분항 ON/OFF
-Q_INT            = 10.0   # 적분 가중치 (VICON 노이즈로 ix 떨리면 5 로)
-INT_LIM          = 2.0    # anti-windup: 적분 누적 한계 [m*s]
-ANGLE_LIM        = 45.0   # roll/pitch 제한 (deg). 90%+ 바람이면 45 권장
+USE_INTEGRAL     = True   # x,y 적분항 ON/OFF (z 적분항은 항상 ON)
+YAW_SETPOINT_DEG = 0.0    # 기수 방향 [deg], 0 = wall 정면. yaw 실험: 45, 90 (|값| <= 135)
+
+# --- preview 품질 (실험 2, 4). 기본값이면 sweep 과 완전히 동일 ---
+PREVIEW_GAIN     = 1.0    # 크기 오차: NMPC 가 믿는 풍속 = 실제 x GAIN
+PREVIEW_SHIFT    = 0.0    # 타이밍 오차 [s]: + 면 NMPC 가 바람이 실제보다 늦게 온다고 믿음
+PREVIEW_NOISE    = 0.0    # 노이즈 σ [m/s], 매 스텝 각 stage 에 독립 가우시안
+PREVIEW_LEAD     = None   # 예측 가능 시간 [s]: None = horizon 전체(2.0). 예: 0.5 -> 0.5s 이후는 0.5s 값 유지
+NOISE_SEED       = None   # None 이면 시각 기반 자동, 로그 헤더에 기록
+
+# --- model mismatch (실험 3): NMPC 모델의 Cd·A 만 스케일 (실제 드론은 그대로) ---
+CD_SCALE         = 1.0    # 0.7 / 1.3 등. (질량 스케일은 정규화 추력 구조상 Cd 스케일과 등가 -> 별도 항목 없음)
+
+# --- 가중치 / 제약 ---
+Q_INT            = 10.0   # x,y 적분 가중치
+Q_INT_Z          = 10.0   # z 적분 가중치
+INT_LIM          = 3.0    # anti-windup: x,y 적분 한계 [m*s] (sweep 최대 1.3 관측 -> 여유)
+INT_LIM_Z        = 1.0    # anti-windup: z 적분 한계 [m*s]
+ANGLE_LIM        = 45.0   # roll/pitch 제한 (deg)
 THRUST_MIN       = 0.35   # 정규화 추력 하한
-THRUST_MAX       = 0.92   # 정규화 추력 상한. ANGLE_LIM=45 면 0.92 권장
+THRUST_MAX       = 0.92   # 정규화 추력 상한
 Q_POS            = 60.0   # x,y 위치 가중치 (검증값 60)
 # ========================================================
-WIND_MAX      = 16.0 * (FAN_PERCENT / 100.0)   # 100% = 16 m/s 선형 가정
-ANGLE_LIM_RAD = np.radians(ANGLE_LIM)          # solver 제약 + clip 에 함께 사용
+WIND_MAX      = 16.0 * (FAN_PERCENT / 100.0)   # 100% = 16 m/s 선형 가정 (공칭값)
+ANGLE_LIM_RAD = np.radians(ANGLE_LIM)
+YAW_SP_RAD    = float(np.radians(YAW_SETPOINT_DEG))
 Q_INT_EFF     = Q_INT if USE_INTEGRAL else 0.0
-HOVER_THRUST  = 0.59
+Q_INT_Z_EFF   = Q_INT_Z   # z 적분항은 항상 ON (USE_INTEGRAL 은 x,y 만 제어)
+HOVER_THRUST  = 0.639     # 18회 무풍 호버 로그 평균 (범위 0.60~0.66, 배터리 상태에 따라 변동 -> iz 가 보상)
 TAKEOFF_ALT   = 1.0
+if NOISE_SEED is None:
+    NOISE_SEED = int(time.time()) % 100000
+RNG = np.random.default_rng(NOISE_SEED)
 
 # ========================================================
 # PART 1: ACADOS Solver Setup
@@ -55,9 +80,9 @@ TAKEOFF_ALT   = 1.0
 m   = 1.9
 g   = 9.81
 Cd  = 1.1
-A_f = 0.0876
+A_f = 0.0755     # Cd*A_f = 0.083 m^2 (2026-09-09 바람 호버 identification, 공칭 풍속 기준)
 rho = 1.225
-tau = 0.30
+tau = 0.25       # 2026-09-09 step response identification
 dt  = 0.1
 N   = 20
 CTRL_HZ = 50
@@ -70,8 +95,8 @@ THRUST_MAX_N = (THRUST_MAX / HOVER_THRUST) * m * g
 px    = ca.MX.sym('px');    py    = ca.MX.sym('py');    pz    = ca.MX.sym('pz')
 vx    = ca.MX.sym('vx');    vy    = ca.MX.sym('vy');    vz    = ca.MX.sym('vz')
 phi   = ca.MX.sym('phi');   theta = ca.MX.sym('theta'); psi   = ca.MX.sym('psi')
-ix    = ca.MX.sym('ix');    iy    = ca.MX.sym('iy')      # 적분 상태 (오차 누적)
-x_sym = ca.vertcat(px, py, pz, vx, vy, vz, phi, theta, psi, ix, iy)
+ix    = ca.MX.sym('ix');    iy    = ca.MX.sym('iy');    iz    = ca.MX.sym('iz')   # 적분 상태
+x_sym = ca.vertcat(px, py, pz, vx, vy, vz, phi, theta, psi, ix, iy, iz)
 
 T         = ca.MX.sym('T')
 phi_cmd   = ca.MX.sym('phi_cmd')
@@ -84,19 +109,21 @@ psi_ref = ca.MX.sym('psi_ref')
 p_sym = ca.vertcat(wx, wy, wz, psi_ref)
 
 vrel_x = vx - wx;  vrel_y = vy - wy;  vrel_z = vz - wz
-drag_coeff = 0.5 * rho * Cd * A_f / m
+drag_coeff = 0.5 * rho * (Cd * A_f * CD_SCALE) / m   # CD_SCALE: mismatch 실험용
+v_rel_norm = ca.sqrt(vrel_x**2 + vrel_y**2 + vrel_z**2 + 0.01)
 
-ax = -(T/m)*(ca.cos(phi)*ca.sin(theta)*ca.cos(psi) + ca.sin(phi)*ca.sin(psi)) - drag_coeff*vrel_x*ca.sqrt(vrel_x**2 + 0.01)
-ay = -(T/m)*(ca.cos(phi)*ca.sin(theta)*ca.sin(psi) - ca.sin(phi)*ca.cos(psi)) - drag_coeff*vrel_y*ca.sqrt(vrel_y**2 + 0.01)
-az =  (T/m)*ca.cos(phi)*ca.cos(theta) - g - drag_coeff*vrel_z*ca.sqrt(vrel_z**2 + 0.01)
+ax = -(T/m)*(ca.cos(phi)*ca.sin(theta)*ca.cos(psi) + ca.sin(phi)*ca.sin(psi)) - drag_coeff*v_rel_norm*vrel_x
+ay = -(T/m)*(ca.cos(phi)*ca.sin(theta)*ca.sin(psi) - ca.sin(phi)*ca.cos(psi)) - drag_coeff*v_rel_norm*vrel_y
+az =  (T/m)*ca.cos(phi)*ca.cos(theta) - g - drag_coeff*v_rel_norm*vrel_z
 
-# px, py 는 (현재위치 - 목표) 오차로 들어오므로 ix_dot=px, iy_dot=py 가 오차의 적분
+# px, py 는 (현재위치 - 목표) 오차 -> ix_dot=px, iy_dot=py
+# pz 는 절대 고도 -> iz_dot = pz - TAKEOFF_ALT (고도 오차의 적분)
 f_expr = ca.vertcat(vx, vy, vz, ax, ay, az,
                     (phi_cmd - phi)/tau, (theta_cmd - theta)/tau, (psi_ref + psi_cmd_delta - psi)/tau,
-                    px, py)
+                    px, py, pz - TAKEOFF_ALT)
 
 model = AcadosModel()
-model.name = 'quadrotor_nmpc_int'
+model.name = 'quadrotor_nmpc_int3'      # 상태 차원 변경 -> 새 이름으로 재생성
 model.x = x_sym
 model.u = u_sym
 model.p = p_sym
@@ -108,13 +135,14 @@ ocp.dims.N = N
 ocp.cost.cost_type   = 'LINEAR_LS'
 ocp.cost.cost_type_e = 'LINEAR_LS'
 
-nx, nu = 11, 4
+nx, nu = 12, 4
 ny = nx + nu
 ocp.cost.Vx   = np.zeros((ny, nx));  ocp.cost.Vx[:nx, :] = np.eye(nx)
 ocp.cost.Vu   = np.zeros((ny, nu));  ocp.cost.Vu[nx:, :] = np.eye(nu)
 ocp.cost.Vx_e = np.eye(nx)
 
-Q_diag = np.array([Q_POS, Q_POS, 80, 1, 1, 1, 0.1, 0.1, 0.1, Q_INT_EFF, Q_INT_EFF])
+#                  px     py     pz  vx vy vz  phi  theta psi  ix         iy         iz
+Q_diag = np.array([Q_POS, Q_POS, 80, 1, 1, 1,  0.1, 0.1,  0.1, Q_INT_EFF, Q_INT_EFF, Q_INT_Z_EFF])
 R_diag = np.array([0.01, 10, 10, 10])
 ocp.cost.W   = np.diag(np.concatenate([Q_diag, R_diag]))
 ocp.cost.W_e = 3.0 * np.diag(Q_diag)
@@ -138,7 +166,7 @@ ocp.solver_options.nlp_solver_type = 'SQP_RTI'
 ocp.solver_options.tf = N * dt
 
 print("ACADOS solver generating...")
-solver = AcadosOcpSolver(ocp, json_file='acados_ocp_int.json')
+solver = AcadosOcpSolver(ocp, json_file='acados_ocp_int3.json')
 print("ACADOS solver ready")
 
 # ========================================================
@@ -146,7 +174,7 @@ print("ACADOS solver ready")
 # ========================================================
 FAN_CMD_ON    = FAN_DELAY_BEFORE
 FAN_CMD_OFF   = FAN_DELAY_BEFORE + WIND_DURATION
-FAN_DELAY_ON  = 1.6    # ON 명령 -> 반응 지연 (실측)
+FAN_DELAY_ON  = 1.6    # ON 명령 -> 반응 지연. sweep 로그상 ~1s 이른 것으로 보임 -> PREVIEW_SHIFT=+1.0 테스트 후 확정 예정
 FAN_DELAY_OFF = 0.41   # OFF 명령 -> 감속 지연 (실측)
 WIND_ACCEL    = 3.5    # 상승 가속 (스펙)
 WIND_DECEL    = 2.0    # 하강 감속 (실측 8/3.96)
@@ -162,6 +190,21 @@ def get_wind(t):
         w_at_fall = min(WIND_MAX, WIND_ACCEL * (fall_start - rise_start))
         w = max(0.0, w_at_fall - WIND_DECEL * (t - fall_start))
     return np.array([-w, 0.0, 0.0])   # 실기: 팬이 드론을 -x 로 밈
+
+def get_wind_preview(t_now, k):
+    """NMPC 에 공급하는 preview (stage k, 시각 t_now + k*dt). 실험 2/4 의 오차·제한 적용.
+    실제 바람(get_wind) 은 팬이 정하며 여기 설정은 NMPC 의 '믿음' 만 바꾼다."""
+    if not USE_WIND_PREVIEW:
+        return np.zeros(3)
+    t_ahead = k * dt
+    if PREVIEW_LEAD is not None and t_ahead > PREVIEW_LEAD + 1e-9:
+        t_ahead = PREVIEW_LEAD                  # lead 이후는 '마지막으로 아는 값 유지' (persistence)
+    w = get_wind(t_now + t_ahead - PREVIEW_SHIFT) * PREVIEW_GAIN
+    if PREVIEW_NOISE > 0.0:
+        w = w + np.array([RNG.normal(0.0, PREVIEW_NOISE), 0.0, 0.0])
+    return w
+
+NMPC_END = FAN_CMD_OFF + 12.0   # 팬 OFF 후 12초 (정착 관찰) 뒤 착륙
 
 def euler_to_quat(roll, pitch, yaw):
     cr, sr = np.cos(roll/2), np.sin(roll/2)
@@ -197,6 +240,13 @@ class NMPCController(Node):
         self.att_sub = self.create_subscription(
             VehicleAttitude, '/fmu/out/vehicle_attitude',
             self.att_callback, qos)
+        # 배터리: PX4 버전에 따라 토픽명이 다를 수 있어 둘 다 구독 (없는 토픽은 그냥 조용함)
+        self.batt_sub = self.create_subscription(
+            BatteryStatus, '/fmu/out/battery_status',
+            self.batt_callback, qos)
+        self.batt_sub_v1 = self.create_subscription(
+            BatteryStatus, '/fmu/out/battery_status_v1',
+            self.batt_callback, qos)
 
         self.offboard_pub = self.create_publisher(
             OffboardControlMode, '/fmu/in/offboard_control_mode', 10)
@@ -213,6 +263,9 @@ class NMPCController(Node):
         self.euler = [0.0, 0.0, 0.0]
         self.pos_received = False
         self.att_received = False
+        self.batt_v = float('nan')
+        self.batt_a = float('nan')
+        self.batt_rem = float('nan')
 
         self.phase = 'TAKEOFF'
         self.counter = 0
@@ -229,12 +282,50 @@ class NMPCController(Node):
         # 적분 상태 (오차 누적)
         self.int_x = 0.0
         self.int_y = 0.0
+        self.int_z = 0.0
+
+        # ===== CSV 로그 =====
+        logdir = os.path.expanduser('~/nmpc_logs')
+        os.makedirs(logdir, exist_ok=True)
+        tag = (f"fan{FAN_PERCENT:.0f}_prev{'ON' if USE_WIND_PREVIEW else 'OFF'}"
+               f"_int{'ON' if USE_INTEGRAL else 'OFF'}")
+        # 기본값이 아닌 실험 설정은 파일명에 표시 (run 번호가 조건별로 따로 세어지도록)
+        if PREVIEW_GAIN != 1.0:    tag += f"_g{PREVIEW_GAIN:g}"
+        if PREVIEW_SHIFT != 0.0:   tag += f"_s{PREVIEW_SHIFT:+g}"
+        if PREVIEW_NOISE != 0.0:   tag += f"_n{PREVIEW_NOISE:g}"
+        if PREVIEW_LEAD is not None: tag += f"_L{PREVIEW_LEAD:g}"
+        if CD_SCALE != 1.0:        tag += f"_cd{CD_SCALE:g}"
+        if YAW_SETPOINT_DEG != 0.0: tag += f"_yaw{YAW_SETPOINT_DEG:g}"
+        if WIND_DURATION != 20.0:  tag += f"_dur{WIND_DURATION:g}"
+        run = 1 + len([f for f in os.listdir(logdir) if f.startswith(f'nmpc_{tag}_run')])
+        fname = os.path.join(logdir,
+            f"nmpc_{tag}_run{run:02d}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        self.log_file = open(fname, 'w', newline='')
+        self.log_file.write(
+            f"# FAN_PERCENT={FAN_PERCENT} WIND_MAX={WIND_MAX} USE_WIND_PREVIEW={USE_WIND_PREVIEW} "
+            f"USE_INTEGRAL={USE_INTEGRAL} Q_INT={Q_INT_EFF} Q_INT_Z={Q_INT_Z_EFF} INT_LIM={INT_LIM} INT_LIM_Z={INT_LIM_Z} "
+            f"tau={tau} Cd={Cd} A_f={A_f} CD_SCALE={CD_SCALE} m={m} HOVER_THRUST={HOVER_THRUST} "
+            f"ANGLE_LIM={ANGLE_LIM} THRUST_MAX={THRUST_MAX} Q_POS={Q_POS} N={N} dt={dt} "
+            f"PREVIEW_GAIN={PREVIEW_GAIN} PREVIEW_SHIFT={PREVIEW_SHIFT} PREVIEW_NOISE={PREVIEW_NOISE} "
+            f"PREVIEW_LEAD={PREVIEW_LEAD} NOISE_SEED={NOISE_SEED} YAW_SETPOINT_DEG={YAW_SETPOINT_DEG} "
+            f"WIND_DURATION={WIND_DURATION} FAN_DELAY_ON={FAN_DELAY_ON} WIND_ACCEL={WIND_ACCEL}\n")
+        self.log_writer = csv.writer(self.log_file)
+        self.log_writer.writerow([
+            't', 'wind_true', 'wind_prev0',
+            'err_x', 'err_y', 'z', 'vx', 'vy', 'vz', 'roll', 'pitch', 'yaw',
+            'int_x', 'int_y', 'int_z',
+            'T_raw', 'roll_raw', 'pitch_raw', 'dpsi_raw',
+            'roll_cmd', 'pitch_cmd', 'thrust',
+            'solve_ms', 'status', 'fallback',
+            'batt_v', 'batt_a', 'batt_rem'])
+        self.get_logger().info(f'CSV log -> {fname}')
 
         self.timer = self.create_timer(CTRL_DT, self.timer_callback)
         self.get_logger().info(
             f'NMPC started | fan {FAN_PERCENT:.0f}% -> {WIND_MAX:.1f} m/s | '
-            f'preview={USE_WIND_PREVIEW} | integral={USE_INTEGRAL} (Q_INT={Q_INT_EFF}) | '
-            f'angle {ANGLE_LIM:.0f}deg | thrust<= {THRUST_MAX}')
+            f'preview={USE_WIND_PREVIEW} | integral={USE_INTEGRAL} (Q_INT={Q_INT_EFF}, Q_INT_Z={Q_INT_Z_EFF}) | '
+            f'hover_thrust={HOVER_THRUST} | angle {ANGLE_LIM:.0f}deg | thrust<= {THRUST_MAX} | '
+            f'gain={PREVIEW_GAIN} shift={PREVIEW_SHIFT} noise={PREVIEW_NOISE} lead={PREVIEW_LEAD} cd_scale={CD_SCALE} yaw={YAW_SETPOINT_DEG}')
 
     def pos_callback(self, msg):
         self.pos_ned = [msg.x, msg.y, msg.z]
@@ -244,6 +335,11 @@ class NMPCController(Node):
     def att_callback(self, msg):
         self.euler = list(quat_to_euler(msg.q))
         self.att_received = True
+
+    def batt_callback(self, msg):
+        self.batt_v = float(msg.voltage_v)
+        self.batt_a = float(msg.current_a)
+        self.batt_rem = float(msg.remaining)
 
     def timer_callback(self):
         self.counter += 1
@@ -273,7 +369,7 @@ class NMPCController(Node):
 
         sp = TrajectorySetpoint()
         sp.position = [self.takeoff_x, self.takeoff_y, -TAKEOFF_ALT]
-        sp.yaw = 0.0
+        sp.yaw = YAW_SP_RAD
         sp.timestamp = ts
         self.traj_pub.publish(sp)
 
@@ -289,16 +385,18 @@ class NMPCController(Node):
             vz = -self.vel_ned[2]
             alt_ok = abs(z_alt - TAKEOFF_ALT) < 0.15
             vz_ok = abs(vz) < 0.15
+            yaw_err = (self.euler[2] - YAW_SP_RAD + np.pi) % (2*np.pi) - np.pi
+            yaw_ok = abs(yaw_err) < np.radians(5.0)
 
-            if alt_ok and vz_ok:
+            if alt_ok and vz_ok and yaw_ok:
                 self.stable_count += 1
             else:
                 self.stable_count = 0
 
             if self.counter % CTRL_HZ == 0:
-                print(f"[TAKEOFF] z={z_alt:.2f}m | vz={vz:.2f}m/s | stable={self.stable_count}")
+                print(f"[TAKEOFF] z={z_alt:.2f}m | vz={vz:.2f}m/s | yaw={np.degrees(self.euler[2]):+.1f} (sp {YAW_SETPOINT_DEG:+.0f}) | stable={self.stable_count} | V={self.batt_v:.2f}")
 
-            if self.stable_count >= int(3.0 * CTRL_HZ):
+            if self.stable_count >= int(3.0 * CTRL_HZ) and self.att_received:
                 self.ref_yaw = self.euler[2]
                 self.stable_count = 0
                 self.ref_x = self.pos_ned[0]
@@ -307,12 +405,13 @@ class NMPCController(Node):
                 # 적분 상태 리셋 (NMPC 시작 시 0 에서 출발)
                 self.int_x = 0.0
                 self.int_y = 0.0
+                self.int_z = 0.0
 
                 init_state = np.array([
                     0.0, 0.0, -self.pos_ned[2],
                     self.vel_ned[0], self.vel_ned[1], -self.vel_ned[2],
                     self.euler[0], self.euler[1], self.euler[2],
-                    0.0, 0.0
+                    0.0, 0.0, 0.0
                 ])
                 u_init = np.array([m*g, 0.0, 0.0, 0.0])
                 for k in range(N + 1):
@@ -331,7 +430,7 @@ class NMPCController(Node):
             return
 
         t = time.monotonic() - self.nmpc_start_monotonic
-        if t > 35.0:
+        if t > NMPC_END:
             self.phase = 'LAND'
             self.get_logger().info('NMPC 종료 -> 자동 착륙')
             return
@@ -347,16 +446,19 @@ class NMPCController(Node):
 
         err_x = self.pos_ned[0] - self.ref_x
         err_y = self.pos_ned[1] - self.ref_y
+        z_alt = -self.pos_ned[2]
+        err_z = z_alt - TAKEOFF_ALT
 
         # 적분 누적 + anti-windup clamp (실기 루프 50Hz -> CTRL_DT 사용!)
         if USE_INTEGRAL:
             self.int_x = float(np.clip(self.int_x + err_x * CTRL_DT, -INT_LIM, INT_LIM))
             self.int_y = float(np.clip(self.int_y + err_y * CTRL_DT, -INT_LIM, INT_LIM))
+        self.int_z = float(np.clip(self.int_z + err_z * CTRL_DT, -INT_LIM_Z, INT_LIM_Z))   # z 는 항상
 
         state = np.array([
             err_x,
             err_y,
-            -self.pos_ned[2],
+            z_alt,
             self.vel_ned[0],
             self.vel_ned[1],
             -self.vel_ned[2],
@@ -364,37 +466,36 @@ class NMPCController(Node):
             self.euler[1],
             self.euler[2],
             self.int_x,
-            self.int_y
+            self.int_y,
+            self.int_z
         ])
 
-        ref = np.zeros(11)
+        ref = np.zeros(nx)
         ref[2] = TAKEOFF_ALT
         ref[8] = self.ref_yaw
 
         solver.set(0, 'lbx', state)
         solver.set(0, 'ubx', state)
 
+        wind_prev0 = get_wind_preview(t, 0)
+        yref_k = np.concatenate([ref, u_hover])
         for k in range(N):
-            yref_k = np.concatenate([ref, u_hover])
             solver.set(k, 'yref', yref_k)
-            if USE_WIND_PREVIEW:
-                wind_k = get_wind(t + k * dt)
-            else:
-                wind_k = np.zeros(3)
+            wind_k = wind_prev0 if k == 0 else get_wind_preview(t, k)
             solver.set(k, 'p', np.concatenate([wind_k, [self.ref_yaw]]))
         solver.set(N, 'yref', ref)
-        if USE_WIND_PREVIEW:
-            wind_terminal = get_wind(t + N * dt)
-        else:
-            wind_terminal = np.zeros(3)
-        solver.set(N, 'p', np.concatenate([wind_terminal, [self.ref_yaw]]))
+        solver.set(N, 'p', np.concatenate([get_wind_preview(t, N), [self.ref_yaw]]))
 
+        t0 = time.perf_counter()
         status = solver.solve()
+        solve_ms = (time.perf_counter() - t0) * 1000.0
         if status != 0:
             self.get_logger().warn(f'Solver failed: status={status}, using hover')
             u_opt = u_hover
+            fallback = 1
         else:
             u_opt = solver.get(0, 'u')
+            fallback = 0
 
         roll_cmd  = float(np.clip(u_opt[1], -ANGLE_LIM_RAD, ANGLE_LIM_RAD))
         pitch_cmd = float(np.clip(u_opt[2], -ANGLE_LIM_RAD, ANGLE_LIM_RAD))
@@ -412,13 +513,25 @@ class NMPCController(Node):
         att_msg.timestamp = ts
         self.att_pub.publish(att_msg)
 
-        # 0.1초마다 로그 (thr = clip 후 정규화 추력, T = NMPC 요구 N, hover=18.6N)
+        self.log_writer.writerow([
+            f"{t:.3f}", f"{get_wind(t)[0]:.3f}", f"{wind_prev0[0]:.3f}",
+            *[f"{v:.4f}" for v in state[:6]],
+            *[f"{np.degrees(v):.3f}" for v in state[6:9]],
+            f"{state[9]:.4f}", f"{state[10]:.4f}", f"{state[11]:.4f}",
+            f"{u_opt[0]:.3f}", f"{np.degrees(u_opt[1]):.3f}", f"{np.degrees(u_opt[2]):.3f}", f"{np.degrees(u_opt[3]):.3f}",
+            f"{np.degrees(roll_cmd):.3f}", f"{np.degrees(pitch_cmd):.3f}", f"{thrust:.4f}",
+            f"{solve_ms:.3f}", status, fallback,
+            f"{self.batt_v:.3f}", f"{self.batt_a:.3f}", f"{self.batt_rem:.3f}"])
+        if self.counter % CTRL_HZ == 0:
+            self.log_file.flush()   # 1초마다 디스크에 기록 (노드가 죽어도 로그 보존)
+
+        # 0.1초마다 터미널 출력 (thr = clip 후 정규화 추력, T = NMPC 요구 N)
         if self.counter % int(0.1 * CTRL_HZ) == 0:
             wnt = get_wind(t)[0]
             print(f"[DEBUG] t={t:5.2f} wnt={wnt:5.1f} | x={state[0]:+.3f} y={state[1]:+.3f} z={state[2]:.3f} | "
                   f"vx={state[3]:+.3f} vy={state[4]:+.3f} | "
-                  f"roll={np.degrees(state[6]):+.1f} pitch={np.degrees(state[7]):+.1f} yaw={np.degrees(state[8]):+.1f} "
-                  f"yaw_cmd={np.degrees(yaw_cmd):+.1f} | ix={self.int_x:+.2f} | thr={thrust:.3f} T={u_opt[0]:5.1f}N")
+                  f"roll={np.degrees(state[6]):+.1f} pitch={np.degrees(state[7]):+.1f} yaw={np.degrees(state[8]):+.1f} | "
+                  f"ix={self.int_x:+.2f} iz={self.int_z:+.2f} | thr={thrust:.3f} T={u_opt[0]:5.1f}N | V={self.batt_v:.2f}")
 
     def set_offboard_mode(self):
         msg = VehicleCommand()
@@ -460,6 +573,7 @@ def main():
         rclpy.spin(node)
     except KeyboardInterrupt:
         print("\nNMPC stopped")
+    node.log_file.close()
     node.destroy_node()
     rclpy.shutdown()
 
