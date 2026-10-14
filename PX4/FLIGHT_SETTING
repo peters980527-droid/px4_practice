@@ -688,7 +688,6 @@ if __name__ == '__main__':
 
 ####################################################################################################################################
 
-cat > ~/nmpc_hover_test.py << 'EOF'
 """
 Wind Preview NMPC 실기 비행 코드 (Jetson) — x/y/z 적분항 + 배터리 로그 버전
 - 이륙 -> NMPC 35초 (팬 3s 후 ON, 20s 유지) -> 자동 착륙
@@ -725,22 +724,22 @@ from px4_msgs.msg import (
 # ========================================================
 # ===== 실험 설정 (여기만 바꾸면 됨) =====
 # ========================================================
-FAN_PERCENT      = 80.0   # 팬 파워 %  <- laptop/fan_node.py 의 FAN_POWER 와 반드시 동일!
+FAN_PERCENT      = 100.0   # 팬 파워 %
 FAN_DELAY_BEFORE = 3.0    # /wind_start 후 fan_node가 팬을 켜기까지 [s]
-WIND_DURATION    = 20.0   # fan_node의 팬 유지 시간 [s]  <- fan_node 와 동일! (gust pulse 실험: 4.0)
-USE_WIND_PREVIEW = False  # preview ON/OFF
-USE_INTEGRAL     = True   # x,y 적분항 ON/OFF (z 적분항은 항상 ON)
+WIND_DURATION    = 20.0
+USE_WIND_PREVIEW = True   # preview ON/OFF
+USE_INTEGRAL     = True   # 적분항 ON/OFF
 YAW_SETPOINT_DEG = 0.0    # 기수 방향 [deg], 0 = wall 정면. yaw 실험: 45, 90 (|값| <= 135)
 
 # --- preview 품질 (실험 2, 4). 기본값이면 sweep 과 완전히 동일 ---
-PREVIEW_GAIN     = 1.0    # 크기 오차: NMPC 가 믿는 풍속 = 실제 x GAIN
-PREVIEW_SHIFT    = 0.0    # 타이밍 오차 [s]: + 면 NMPC 가 바람이 실제보다 늦게 온다고 믿음
-PREVIEW_NOISE    = 0.0    # 노이즈 σ [m/s], 매 스텝 각 stage 에 독립 가우시안
-PREVIEW_LEAD     = None   # 예측 가능 시간 [s]: None = horizon 전체(2.0). 예: 0.5 -> 0.5s 이후는 0.5s 값 유지
+PREVIEW_GAIN     = 1.0
+PREVIEW_SHIFT    = 0.0
+PREVIEW_NOISE    = 0.0
+PREVIEW_LEAD     = None
 NOISE_SEED       = None   # None 이면 시각 기반 자동, 로그 헤더에 기록
 
 # --- model mismatch (실험 3): NMPC 모델의 Cd·A 만 스케일 (실제 드론은 그대로) ---
-CD_SCALE         = 1.0    # 0.7 / 1.3 등. (질량 스케일은 정규화 추력 구조상 Cd 스케일과 등가 -> 별도 항목 없음)
+CD_SCALE         = 1.0
 
 # --- 가중치 / 제약 ---
 Q_INT            = 10.0   # x,y 적분 가중치
@@ -812,7 +811,7 @@ f_expr = ca.vertcat(vx, vy, vz, ax, ay, az,
                     px, py, pz - TAKEOFF_ALT)
 
 model = AcadosModel()
-model.name = 'quadrotor_nmpc_int3'      # 상태 차원 변경 -> 새 이름으로 재생성
+model.name = f'quadrotor_nmpc_int3_cd{round(CD_SCALE*100):03d}'   # CD_SCALE 마다 새로 생성
 model.x = x_sym
 model.u = u_sym
 model.p = p_sym
@@ -855,7 +854,7 @@ ocp.solver_options.nlp_solver_type = 'SQP_RTI'
 ocp.solver_options.tf = N * dt
 
 print("ACADOS solver generating...")
-solver = AcadosOcpSolver(ocp, json_file='acados_ocp_int3.json')
+solver = AcadosOcpSolver(ocp, json_file=f'acados_ocp_int3_cd{round(CD_SCALE*100):03d}.json')
 print("ACADOS solver ready")
 
 # ========================================================
@@ -863,9 +862,9 @@ print("ACADOS solver ready")
 # ========================================================
 FAN_CMD_ON    = FAN_DELAY_BEFORE
 FAN_CMD_OFF   = FAN_DELAY_BEFORE + WIND_DURATION
-FAN_DELAY_ON  = 1.6    # ON 명령 -> 반응 지연. sweep 로그상 ~1s 이른 것으로 보임 -> PREVIEW_SHIFT=+1.0 테스트 후 확정 예정
+FAN_DELAY_ON  = 2.4    # ON 명령 -> 반응 지연 (OFF 비행 9회 fit, 2026-09-11)
 FAN_DELAY_OFF = 0.41   # OFF 명령 -> 감속 지연 (실측)
-WIND_ACCEL    = 3.5    # 상승 가속 (스펙)
+WIND_ACCEL    = {40.0: 3.8, 60.0: 4.9, 80.0: 4.9}.get(FAN_PERCENT, 4.6)   # OFF 비행 9회 fit
 WIND_DECEL    = 2.0    # 하강 감속 (실측 8/3.96)
 
 def get_wind(t):
@@ -1269,7 +1268,3 @@ def main():
 if __name__ == '__main__':
     main()
 EOF
-
-
-
-
